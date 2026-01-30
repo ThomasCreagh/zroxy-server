@@ -37,7 +37,7 @@ fn get_server_socket(port: u16, backlog: u31) !posix.socket_t {
 
     try posix.listen(
         server_socket,
-        backlog, // que up to 10 pending connections
+        backlog, // que up to "backlog" pending connections
     );
 
     return server_socket;
