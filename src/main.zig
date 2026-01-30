@@ -52,7 +52,7 @@ fn get_client_socket(server_socket: posix.socket_t) posix.AcceptError!posix.sock
         server_socket,
         @ptrCast(&client_addr),
         &client_len,
-        0, // no flags
+        0, // no flags same as INADDR_ANY
     );
     return client_socket;
 }
