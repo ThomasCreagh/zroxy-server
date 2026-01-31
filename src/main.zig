@@ -4,14 +4,14 @@ const posix = std.posix;
 pub fn main() !void {
     std.debug.print("server started...\n", .{});
 
-    const server_socket = try get_server_socket(8083, 10);
+    const server_socket = try get_server_socket(8081, 10);
     defer posix.close(server_socket);
 
     while (true) {
         const client_socket = get_client_socket(server_socket) catch continue;
-        defer posix.close(client_socket);
 
-        echo(client_socket);
+        _ = try std.Thread.spawn(.{}, echo, .{client_socket});
+        // echo(client_socket); for single threaded
     }
 }
 
@@ -63,14 +63,16 @@ fn echo(client_socket: posix.socket_t) void {
     while (true) {
         const bytes_read = posix.read(client_socket, &buf) catch |err| {
             std.debug.print("read failed. got and error: {}\n", .{err});
-            continue;
+            break;
         };
 
         if (bytes_read == 0) break;
 
         _ = posix.write(client_socket, buf[0..bytes_read]) catch |err| {
             std.debug.print("write failed. got and error: {}\n", .{err});
-            continue;
+            break;
         };
     }
+
+    posix.close(client_socket);
 }
