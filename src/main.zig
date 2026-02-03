@@ -3,8 +3,10 @@ const posix = std.posix;
 
 const loop = @import("event/loop.zig");
 
+const PORT = 8081;
+
 pub fn main() !void {
-    std.debug.print("server started...\n", .{});
+    std.debug.print("server started on port {}...\n", .{PORT});
 
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
@@ -14,7 +16,7 @@ pub fn main() !void {
         if (deinit_status == .leak) std.testing.expect(false) catch @panic("TEST FAIL");
     }
 
-    const server_socket = try set_up_server_socket(8081, 10);
+    const server_socket = try set_up_server_socket(PORT, 10);
     defer posix.close(server_socket);
 
     try loop.init(server_socket, allocator);

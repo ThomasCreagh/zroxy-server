@@ -24,9 +24,15 @@ pub fn init(socket: posix.socket_t, allocator: std.mem.Allocator) !void {
     }
 
     var events: [MAX_EVENTS]linux.epoll_event = undefined;
+    var loop_count: usize = 0;
 
     while (true) {
         const ready_count = posix.epoll_wait(efd, events[0..], -1); // no timeout
+
+        loop_count += 1;
+        if (loop_count % 1000 == 0) {
+            std.debug.print("Loop: {}, Ready: {}, Clients: {}\n", .{ loop_count, ready_count, clients.count() });
+        }
 
         for (0..ready_count) |i| {
             const ev = events[i];
@@ -40,6 +46,7 @@ pub fn init(socket: posix.socket_t, allocator: std.mem.Allocator) !void {
                         const new_state = try epoll.add(efd, client_fd, allocator);
                         try clients.put(client_fd, new_state);
                     }
+                    std.debug.print("Accepted {} clients, total: {}\n", .{ accept_count, clients.count() });
                 } else {
                     const has_err = (ev.events & linux.EPOLL.ERR) != 0;
                     const has_hup = (ev.events & linux.EPOLL.HUP) != 0;
@@ -138,13 +145,14 @@ fn cleanup_client(
     clients: *std.AutoHashMap(posix.socket_t, *epoll.ClientState),
     allocator: std.mem.Allocator,
 ) !void {
-    posix.epoll_ctl(efd, linux.EPOLL.CTL_DEL, state.fd, null) catch {};
-    posix.close(state.fd);
+    const fd = state.fd;
+    posix.epoll_ctl(efd, linux.EPOLL.CTL_DEL, fd, null) catch {};
+    posix.close(fd);
 
     state.read_buf.deinit(allocator);
     state.write_buf.deinit(allocator);
     allocator.destroy(state);
-    _ = clients.remove(state.fd);
+    _ = clients.remove(fd);
 }
 
 fn get_client_socket(server_socket: posix.socket_t) posix.AcceptError!posix.socket_t {
