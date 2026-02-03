@@ -1,1 +1,1 @@
-zig build && ./zig-out/bin/zroxy_server
+zig build -Doptimize=ReleaseFast && ./zig-out/bin/zroxy_server

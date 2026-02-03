@@ -30,9 +30,9 @@ pub fn init(socket: posix.socket_t, allocator: std.mem.Allocator) !void {
         const ready_count = posix.epoll_wait(efd, events[0..], -1); // no timeout
 
         loop_count += 1;
-        if (loop_count % 1000 == 0) {
-            std.debug.print("Loop: {}, Ready: {}, Clients: {}\n", .{ loop_count, ready_count, clients.count() });
-        }
+        //if (loop_count % 1000 == 0) {
+        //    std.debug.print("Loop: {}, Ready: {}, Clients: {}\n", .{ loop_count, ready_count, clients.count() });
+        //}
 
         for (0..ready_count) |i| {
             const ev = events[i];
@@ -46,7 +46,7 @@ pub fn init(socket: posix.socket_t, allocator: std.mem.Allocator) !void {
                         const new_state = try epoll.add(efd, client_fd, allocator);
                         try clients.put(client_fd, new_state);
                     }
-                    std.debug.print("Accepted {} clients, total: {}\n", .{ accept_count, clients.count() });
+                    //std.debug.print("Accepted {} clients, total: {}\n", .{ accept_count, clients.count() });
                 } else {
                     const has_err = (ev.events & linux.EPOLL.ERR) != 0;
                     const has_hup = (ev.events & linux.EPOLL.HUP) != 0;
