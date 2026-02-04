@@ -3,9 +3,6 @@ const Connection = @import("connection.zig").Connection;
 const posix = std.posix;
 const linux = std.os.linux;
 
-//const CPU_SETSIZE = 1024;
-//const cpu_set_t = [CPU_SETSIZE / @bitSizeOf(usize)]usize;
-
 pub const Worker = struct {
     ring: linux.IoUring,
     connections: std.AutoHashMap(u64, *Connection),
@@ -16,6 +13,7 @@ pub const Worker = struct {
 
     const RING_SIZE = 4096;
     const MAX_ACCEPTS_PER_BATCH = 128;
+    const CQE_BUF_SIZE = 64;
 
     pub fn init(allocator: std.mem.Allocator, listen_fd: posix.socket_t, worker_id: usize) !Worker {
         const ring = try linux.IoUring.init(RING_SIZE, 0);
@@ -37,14 +35,13 @@ pub const Worker = struct {
         try self.queueAccepts(MAX_ACCEPTS_PER_BATCH);
 
         var stats_timer: usize = 0;
+        var cqe_buf: [CQE_BUF_SIZE]linux.io_uring_cqe = undefined;
 
         while (true) {
             _ = try self.ring.submit_and_wait(1);
 
-            var cqe_count: u32 = 0;
-            while (true) {
-                const cqe = self.ring.copy_cqe() catch break;
-                cqe_count += 1;
+            const cqe_count = try self.ring.copy_cqes(cqe_buf[0..], 0); // returns io completions, waiting if neccassery
+            for (cqe_buf[0..cqe_count]) |cqe| {
                 try self.handleCompletion(cqe);
             }
 
@@ -72,17 +69,20 @@ pub const Worker = struct {
             return;
         }
 
-        const conn = self.connections.get(user_data) orelse return;
+        const conn: *Connection = @ptrFromInt(user_data);
+        if (conn.closing) return;
 
         if (result < 0) {
-            try self.closeConnection(user_data);
+            conn.closing = true;
+            try self.closeConnection(conn);
             return;
         }
 
         switch (conn.state) {
             .reading => {
                 if (result == 0) { // eof
-                    try self.closeConnection(user_data);
+                    conn.closing = true;
+                    try self.closeConnection(conn);
                 } else {
                     conn.bytes_to_write = @intCast(result);
                     try self.queueWrite(conn);
@@ -95,7 +95,7 @@ pub const Worker = struct {
                     conn.bytes_to_write = 0;
                     try self.queueRead(conn);
                 } else {
-                    try self.queueWrite(conn); // partial write, continue
+                    try self.queueWrite(conn); // partial write, continue writing
                 }
             },
         }
@@ -105,12 +105,12 @@ pub const Worker = struct {
         const conn = try self.allocator.create(Connection);
         errdefer self.allocator.destroy(conn);
 
-        const user_data = self.next_user_data;
-        self.next_user_data += 1;
+        //const user_data = self.next_user_data;
+        //self.next_user_data += 1;
 
-        conn.* = Connection.init(fd, user_data);
+        conn.* = Connection.init(fd, @intFromPtr(conn));
 
-        try self.connections.put(user_data, conn);
+        try self.connections.put(@intFromPtr(conn), conn);
 
         try self.queueRead(conn); // queue init
     }
@@ -161,9 +161,10 @@ pub const Worker = struct {
         sqe.user_data = conn.user_data;
     }
 
-    fn closeConnection(self: *Worker, user_data: u64) !void {
-        if (self.connections.fetchRemove(user_data)) |kv| {
-            const conn = kv.value;
+    fn closeConnection(self: *Worker, conn: *Connection) !void {
+        // @intFromPtr(conn)
+        if (self.connections.fetchRemove(@intFromPtr(conn))) |_| {
+            //const conn = kv.value;
             posix.close(conn.fd);
             self.allocator.destroy(conn);
         }
