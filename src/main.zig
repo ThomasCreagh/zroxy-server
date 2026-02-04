@@ -1,9 +1,9 @@
 const std = @import("std");
 const posix = std.posix;
-
-const loop = @import("event/loop.zig");
+const Server = @import("server.zig").Server;
 
 const PORT = 8081;
+const RING_PER_WORKER = 4096;
 
 pub fn main() !void {
     std.debug.print("server started on port {}...\n", .{PORT});
@@ -12,23 +12,25 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     defer {
         const deinit_status = gpa.deinit();
-        //fail test; can't try in defer as defer is executed after we return
         if (deinit_status == .leak) std.testing.expect(false) catch @panic("TEST FAIL");
     }
 
-    const server_socket = try set_up_server_socket(PORT, 10);
-    defer posix.close(server_socket);
+    const cpu_count = try std.Thread.getCpuCount();
+    std.debug.print("CPU has {} cpus\n", .{cpu_count});
 
-    try loop.init(server_socket, allocator);
+    var server = try Server.init(allocator, PORT, cpu_count);
+    defer server.deinit();
 
-    //    while (true) {
-    //        const client_socket = get_client_socket(server_socket) catch continue;
+    std.debug.print("Server listening on port {}\n", .{PORT});
+    std.debug.print("Workers: {}\n", .{server.workers.len});
+    std.debug.print("Ring size per worker: {}\n", .{RING_PER_WORKER});
 
-    //        _ = try std.Thread.spawn(.{}, echo, .{client_socket});
-    //    }
+    try server.run();
+
+    //const server_socket = try set_up_server_socket(PORT, 10);
+    //defer posix.close(server_socket);
 }
 
-// (posix.BindError || posix.ListenError)
 fn set_up_server_socket(port: u16, backlog: u31) !posix.socket_t {
     const server_socket = try get_server_socket();
     try listen_and_bind(server_socket, port, backlog);
@@ -74,17 +76,3 @@ fn get_server_socket() posix.SocketError!posix.socket_t {
 
     return server_socket;
 }
-
-// fn get_client_socket(server_socket: posix.socket_t) posix.AcceptError!posix.socket_t {
-//     var client_addr: posix.sockaddr.in = undefined;
-//
-//     var client_len: posix.socklen_t = @sizeOf(@TypeOf(client_addr));
-//
-//     const client_socket = try posix.accept(
-//         server_socket,
-//         @ptrCast(&client_addr),
-//         &client_len,
-//         0, // no flags same as INADDR_ANY
-//     );
-//     return client_socket;
-// }
