@@ -4,6 +4,7 @@ const Server = @import("server.zig").Server;
 
 const PORT = 8081;
 const RING_PER_WORKER = 4096;
+const WORKERS = 6;
 
 pub fn main() !void {
     std.debug.print("server started on port {}...\n", .{PORT});
@@ -15,10 +16,10 @@ pub fn main() !void {
         if (deinit_status == .leak) std.testing.expect(false) catch @panic("TEST FAIL");
     }
 
-    const cpu_count = try std.Thread.getCpuCount();
-    std.debug.print("CPU has {} cpus\n", .{cpu_count});
+    //const cpu_count = try std.Thread.getCpuCount();
+    std.debug.print("CPU has {} cpus\n", .{WORKERS});
 
-    var server = try Server.init(allocator, PORT, cpu_count);
+    var server = try Server.init(allocator, PORT, WORKERS);
     defer server.deinit();
 
     std.debug.print("Server listening on port {}\n", .{PORT});
