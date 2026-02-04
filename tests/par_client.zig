@@ -25,8 +25,6 @@ const Stats = struct {
     fn report(self: *Stats) void {
         const elapsed: f64 = @floatFromInt(std.time.milliTimestamp() - self.start_time);
         const total: f64 = @floatFromInt(self.bytes.load(.monotonic));
-        //const throughput = @as(f64, @floatFromInt(total)) /
-        //@as(f64, @floatFromInt(elapsed)) * 1000.0 / 1024.0 / 1024.0;
 
         const throughput_bytes_per_sec = total / (elapsed / 1000);
         const throughput_MBps = throughput_bytes_per_sec / 1024 / 1024;
@@ -34,8 +32,9 @@ const Stats = struct {
         const throughput_Gbps = throughput_bytes_per_sec * 8 / 1_000_000_000;
 
         std.debug.print("\n=== Results ===\n", .{});
-        std.debug.print("Total: {d:.2} MB in {}ms\n", .{
+        std.debug.print("Total: {d:.2} MB ({d:.2} GB) in {}ms\n", .{
             total / 1024.0 / 1024.0,
+            total / 1024.0 / 1024.0 / 1024.0,
             elapsed,
         });
         std.debug.print("Throughput: {d:.2} bytes/sec\n", .{throughput_bytes_per_sec});
@@ -109,12 +108,10 @@ pub fn main() !void {
     var stats = Stats.init();
     var threads: [THREADS]Thread = undefined;
 
-    // Spawn threads
     for (&threads, 0..) |*thread, i| {
         thread.* = try Thread.spawn(.{}, workerThread, .{ i, &stats });
     }
 
-    // Wait for completion
     for (threads) |thread| {
         thread.join();
     }
