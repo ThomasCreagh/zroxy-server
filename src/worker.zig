@@ -3,9 +3,6 @@ const Connection = @import("connection.zig").Connection;
 const posix = std.posix;
 const linux = std.os.linux;
 
-//const CPU_SETSIZE = 1024;
-//const cpu_set_t = [CPU_SETSIZE / @bitSizeOf(usize)]usize;
-
 pub const Worker = struct {
     ring: linux.IoUring,
     connections: std.AutoHashMap(u64, *Connection),
@@ -16,6 +13,7 @@ pub const Worker = struct {
 
     const RING_SIZE = 4096;
     const MAX_ACCEPTS_PER_BATCH = 128;
+    const CQE_BUF_SIZE = 64;
 
     pub fn init(allocator: std.mem.Allocator, listen_fd: posix.socket_t, worker_id: usize) !Worker {
         const ring = try linux.IoUring.init(RING_SIZE, 0);
@@ -37,14 +35,13 @@ pub const Worker = struct {
         try self.queueAccepts(MAX_ACCEPTS_PER_BATCH);
 
         var stats_timer: usize = 0;
+        var cqe_buf: [CQE_BUF_SIZE]linux.io_uring_cqe = undefined;
 
         while (true) {
             _ = try self.ring.submit_and_wait(1);
 
-            var cqe_count: u32 = 0;
-            while (true) {
-                const cqe = self.ring.copy_cqe() catch break;
-                cqe_count += 1;
+            const cqe_count = try self.ring.copy_cqes(cqe_buf[0..], 0); // returns io completions, waiting if neccassery
+            for (cqe_buf[0..cqe_count]) |cqe| {
                 try self.handleCompletion(cqe);
             }
 
@@ -72,7 +69,7 @@ pub const Worker = struct {
             return;
         }
 
-        const conn = self.connections.get(user_data) orelse return;
+        const conn = self.connections.get(user_data) orelse return; // why not conn = @ptrFromInt(user_data)?
 
         if (result < 0) {
             try self.closeConnection(user_data);
@@ -95,7 +92,7 @@ pub const Worker = struct {
                     conn.bytes_to_write = 0;
                     try self.queueRead(conn);
                 } else {
-                    try self.queueWrite(conn); // partial write, continue
+                    try self.queueWrite(conn); // partial write, continue writing
                 }
             },
         }

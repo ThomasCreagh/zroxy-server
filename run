@@ -1,5 +1,1 @@
-ulimit -n 100000
-sudo sysctl -w net.core.somaxconn=65536
-sudo sysctl -w fs.file-max=2000000
-
 zig build -Doptimize=ReleaseFast && ./zig-out/bin/zroxy_server
