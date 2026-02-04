@@ -69,17 +69,20 @@ pub const Worker = struct {
             return;
         }
 
-        const conn = self.connections.get(user_data) orelse return; // why not conn = @ptrFromInt(user_data)?
+        const conn: *Connection = @ptrFromInt(user_data);
+        if (conn.closing) return;
 
         if (result < 0) {
-            try self.closeConnection(user_data);
+            conn.closing = true;
+            try self.closeConnection(conn);
             return;
         }
 
         switch (conn.state) {
             .reading => {
                 if (result == 0) { // eof
-                    try self.closeConnection(user_data);
+                    conn.closing = true;
+                    try self.closeConnection(conn);
                 } else {
                     conn.bytes_to_write = @intCast(result);
                     try self.queueWrite(conn);
@@ -102,12 +105,12 @@ pub const Worker = struct {
         const conn = try self.allocator.create(Connection);
         errdefer self.allocator.destroy(conn);
 
-        const user_data = self.next_user_data;
-        self.next_user_data += 1;
+        //const user_data = self.next_user_data;
+        //self.next_user_data += 1;
 
-        conn.* = Connection.init(fd, user_data);
+        conn.* = Connection.init(fd, @intFromPtr(conn));
 
-        try self.connections.put(user_data, conn);
+        try self.connections.put(@intFromPtr(conn), conn);
 
         try self.queueRead(conn); // queue init
     }
@@ -158,9 +161,10 @@ pub const Worker = struct {
         sqe.user_data = conn.user_data;
     }
 
-    fn closeConnection(self: *Worker, user_data: u64) !void {
-        if (self.connections.fetchRemove(user_data)) |kv| {
-            const conn = kv.value;
+    fn closeConnection(self: *Worker, conn: *Connection) !void {
+        // @intFromPtr(conn)
+        if (self.connections.fetchRemove(@intFromPtr(conn))) |_| {
+            //const conn = kv.value;
             posix.close(conn.fd);
             self.allocator.destroy(conn);
         }

@@ -10,6 +10,7 @@ pub const Connection = struct {
     user_data: u64,
     bytes_to_write: usize,
     bytes_written: usize,
+    closing: bool,
 
     pub const State = enum {
         reading,
@@ -24,6 +25,7 @@ pub const Connection = struct {
             .user_data = user_data,
             .bytes_to_write = 0,
             .bytes_written = 0,
+            .closing = false,
         };
     }
 };
