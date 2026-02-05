@@ -10,7 +10,7 @@ pub const Worker = struct {
     listen_fd: posix.socket_t,
     worker_id: usize,
 
-    const RING_SIZE = 4096;
+    const RING_SIZE = 4096; // * 8;
     const MAX_ACCEPTS_PER_BATCH = 128;
     const CQE_BUF_SIZE = 64;
 
@@ -57,11 +57,6 @@ pub const Worker = struct {
     fn handleCompletion(self: *Worker, cqe: linux.io_uring_cqe) !void {
         const user_data = cqe.user_data;
         const result = cqe.res;
-
-        if (user_data != 0) {
-            const conn: *Connection = @ptrFromInt(user_data);
-            std.debug.print("State: {s}, Result: {}\n", .{ @tagName(conn.state), result });
-        }
 
         if (user_data == 0) {
             if (result >= 0) {
@@ -110,7 +105,6 @@ pub const Worker = struct {
                 }
             },
             .connecting_upstream => {
-                //std.debug.print("Connect 'completed' with result: {}\n", .{result});
                 if (result < 0) {
                     std.debug.print("Failed to connect to upstream: {}\n", .{result});
                     conn.closing = true;
@@ -134,7 +128,6 @@ pub const Worker = struct {
                 }
             },
             .reading_upstream_response => {
-                //std.debug.print("Read {} bytes from upstream\n", .{result});
                 if (result == 0) {
                     if (conn.upstream_fd) |fd| {
                         posix.close(fd);
@@ -194,41 +187,10 @@ pub const Worker = struct {
             0,
         );
     }
-
-    fn _queueConnect(self: *Worker, conn: *Connection) !void {
-        const addr = posix.sockaddr.in{
-            .family = posix.AF.INET,
-            .port = std.mem.nativeToBig(u16, 8080),
-            .addr = std.mem.nativeToBig(u32, 0x7F000001),
-            .zero = [_]u8{0} ** 8,
-        };
-
-        // Call connect directly (non-blocking, will return immediately)
-        _ = posix.connect(
-            conn.upstream_fd.?,
-            @ptrCast(&addr),
-            @sizeOf(@TypeOf(addr)),
-        ) catch |err| {
-            // WouldBlock/InProgress is EXPECTED for non-blocking connect
-            if (err != error.WouldBlock) {
-                //std.debug.print("Connect error: {}\n", .{err});
-                return err;
-            }
-            // WouldBlock is fine, connection is in progress
-        };
-
-        //std.debug.print("Connect initiated (non-blocking)\n", .{});
-
-        // Queue a NOP to signal "connect initiated"
-        const sqe = try self.ring.get_sqe();
-        linux.io_uring_sqe.prep_nop(sqe);
-        sqe.user_data = conn.user_data;
-    }
-
     fn queueConnect(self: *Worker, conn: *Connection) !void {
         const sqe = try self.ring.get_sqe();
 
-        const addr = posix.sockaddr.in{
+        conn.upstream_addr = posix.sockaddr.in{
             .family = posix.AF.INET,
             .port = std.mem.nativeToBig(u16, 8080),
             .addr = std.mem.nativeToBig(u32, 0x7F000001),
@@ -238,8 +200,8 @@ pub const Worker = struct {
         linux.io_uring_sqe.prep_connect(
             sqe,
             conn.upstream_fd.?,
-            @as(*const posix.sockaddr, @ptrCast(&addr)),
-            @sizeOf(@TypeOf(addr)),
+            @ptrCast(&conn.upstream_addr),
+            @sizeOf(@TypeOf(conn.upstream_addr)),
         );
 
         sqe.user_data = conn.user_data;
@@ -321,6 +283,7 @@ pub const Worker = struct {
         posix.close(conn.client_fd);
         if (conn.upstream_fd) |fd| {
             posix.close(fd);
+            conn.upstream_fd = null;
         }
 
         if (self.connections.fetchRemove(@intFromPtr(conn))) |_| {

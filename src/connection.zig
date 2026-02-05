@@ -21,6 +21,7 @@ pub const Connection = struct {
 
     upstream_host: ?[]const u8,
     upstream_port: u16,
+    upstream_addr: posix.sockaddr.in,
 
     pub const State = enum {
         reading_client_request,
@@ -45,6 +46,7 @@ pub const Connection = struct {
             .closing = false,
             .upstream_host = null,
             .upstream_port = 80,
+            .upstream_addr = undefined,
         };
     }
 
