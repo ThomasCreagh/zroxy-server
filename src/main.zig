@@ -1,6 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
-const Server = @import("server.zig").Server;
+const Server = @import("proxy/server.zig").Server;
 
 const PORT = 8081;
 const RING_PER_WORKER = 4096;

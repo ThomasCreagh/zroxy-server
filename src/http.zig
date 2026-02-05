@@ -1,61 +1,28 @@
 const std = @import("std");
+const Connection = @import("proxy/connection.zig").Connection;
 
-pub const Method = enum {
-    GET,
-    POST,
-    PUT,
-    DELETE,
-    HEAD,
-    OPTIONS,
+pub fn parseHost(conn: *Connection) !void {
+    _ = conn;
+}
+pub fn futureParseHost(conn: *Connection) !void {
+    const request = conn.client_buf[0..conn.client_data_len];
 
-    pub fn fromString(s: []const u8) !Method {
-        if (std.mem.eql(u8, s, "GET")) return .GET;
-        if (std.mem.eql(u8, s, "POST")) return .POST;
-        if (std.mem.eql(u8, s, "PUT")) return .PUT;
-        if (std.mem.eql(u8, s, "DELETE")) return .DELETE;
-        if (std.mem.eql(u8, s, "HEAD")) return .HEAD;
-        if (std.mem.eql(u8, s, "OPTIONS")) return .OPTIONS;
-        return error.InvalidMethod;
-    }
-};
+    var lines = std.mem.tokenizeAny(u8, request, "\r\n");
+    _ = lines.next();
 
-pub const Status = enum(u16) {
-    ok = 200,
-    bad_request = 400,
-    not_found = 404,
-    internal_server_error = 500,
-    bad_gateway = 502,
-};
+    while (lines.next()) |line| {
+        if (std.ascii.startsWithIgnoreCase(line, "host:")) {
+            const host_value = std.mem.trim(u8, line[5..], "\t ");
 
-pub const Header = struct {
-    header: []const u8,
-    value: []const u8,
-};
-
-pub const Request = struct {
-    method: Method,
-    path: []const u8,
-    version: []const u8,
-    headers: std.ArrayList(Header),
-    body: ?[]const u8,
-
-    pub fn deinit(self: *Request) void {
-        self.headers.deinit();
-    }
-    pub fn getHeader(self: *const Request, name: []const u8) ?[]const u8 {
-        for (self.headers.items) |header| {
-            if (std.ascii.eqlIgnoreCase(header.name, name)) {
-                return header.value;
+            if (std.mem.indexOf(u8, host_value, ":")) |colon_pos| {
+                conn.upstream_host = host_value[0..colon_pos];
+                conn.upstream_port = std.fmt.parseInt(u8, host_value[colon_pos + 1 ..], 10) catch 80;
+            } else {
+                conn.upstream_host = host_value;
+                conn.upstream_port = 80;
             }
+            return;
         }
-        return null;
     }
-};
-
-pub const Response = struct {
-    status: Status,
-    reason: []const u8,
-    version: []const u8,
-    header: std.ArrayList(Header),
-    body: ?[]const u8,
-};
+    return error.NoHostHeader;
+}
