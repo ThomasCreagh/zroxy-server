@@ -9,7 +9,6 @@ pub const Worker = struct {
     allocator: std.mem.Allocator,
     listen_fd: posix.socket_t,
     worker_id: usize,
-    next_user_data: u64,
 
     const RING_SIZE = 4096;
     const MAX_ACCEPTS_PER_BATCH = 128;
@@ -24,13 +23,12 @@ pub const Worker = struct {
             .allocator = allocator,
             .listen_fd = listen_fd,
             .worker_id = worker_id,
-            .next_user_data = 1,
         };
     }
 
     pub fn run(self: *Worker) !void {
         try pinToCpu(self.worker_id);
-        std.debug.print("Worker {} pinned to CPU {}\n", .{ self.worker_id, self.worker_id });
+        //std.debug.print("Worker {} pinned to CPU {}\n", .{ self.worker_id, self.worker_id });
 
         try self.queueAccepts(MAX_ACCEPTS_PER_BATCH);
 
@@ -40,7 +38,7 @@ pub const Worker = struct {
         while (true) {
             _ = try self.ring.submit_and_wait(1);
 
-            const cqe_count = try self.ring.copy_cqes(cqe_buf[0..], 0); // returns io completions, waiting if neccassery
+            const cqe_count = try self.ring.copy_cqes(cqe_buf[0..], 0);
             for (cqe_buf[0..cqe_count]) |cqe| {
                 try self.handleCompletion(cqe);
             }
@@ -59,6 +57,11 @@ pub const Worker = struct {
     fn handleCompletion(self: *Worker, cqe: linux.io_uring_cqe) !void {
         const user_data = cqe.user_data;
         const result = cqe.res;
+
+        if (user_data != 0) {
+            const conn: *Connection = @ptrFromInt(user_data);
+            std.debug.print("State: {s}, Result: {}\n", .{ @tagName(conn.state), result });
+        }
 
         if (user_data == 0) {
             if (result >= 0) {
@@ -79,23 +82,94 @@ pub const Worker = struct {
         }
 
         switch (conn.state) {
-            .reading => {
-                if (result == 0) { // eof
+            .reading_client_request => {
+                if (result == 0) {
                     conn.closing = true;
                     try self.closeConnection(conn);
+                    return;
+                }
+
+                conn.client_data_len = @intCast(result);
+                conn.client_data_sent = 0;
+
+                conn.parseHost() catch {
+                    std.debug.print("Failed to parse Host header\n", .{});
+                    conn.closing = true;
+                    try self.closeConnection(conn);
+                    return;
+                };
+
+                if (conn.upstream_fd == null) {
+                    const upstream_fd = try self.connectUpstream();
+                    conn.upstream_fd = upstream_fd;
+                    conn.state = .connecting_upstream;
+                    try self.queueConnect(conn);
                 } else {
-                    conn.bytes_to_write = @intCast(result);
-                    try self.queueWrite(conn);
+                    conn.state = .forwarding_to_upstream;
+                    try self.queueWriteToUpstream(conn);
                 }
             },
-            .writing => {
-                conn.bytes_written += @intCast(result);
-                if (conn.bytes_written >= conn.bytes_to_write) {
-                    conn.bytes_written = 0;
-                    conn.bytes_to_write = 0;
-                    try self.queueRead(conn);
+            .connecting_upstream => {
+                //std.debug.print("Connect 'completed' with result: {}\n", .{result});
+                if (result < 0) {
+                    std.debug.print("Failed to connect to upstream: {}\n", .{result});
+                    conn.closing = true;
+                    try self.closeConnection(conn);
+                    return;
+                }
+
+                conn.state = .forwarding_to_upstream;
+                try self.queueWriteToUpstream(conn);
+            },
+            .forwarding_to_upstream => {
+                conn.client_data_sent += @intCast(result);
+
+                if (conn.client_data_sent >= conn.client_data_len) {
+                    conn.state = .reading_upstream_response;
+                    conn.upstream_data_len = 0;
+                    conn.upstream_data_sent = 0;
+                    try self.queueReadFromUpstream(conn);
                 } else {
-                    try self.queueWrite(conn); // partial write, continue writing
+                    try self.queueWriteToUpstream(conn);
+                }
+            },
+            .reading_upstream_response => {
+                //std.debug.print("Read {} bytes from upstream\n", .{result});
+                if (result == 0) {
+                    if (conn.upstream_fd) |fd| {
+                        posix.close(fd);
+                        conn.upstream_fd = null;
+                    }
+
+                    if (conn.upstream_data_len > 0) {
+                        conn.state = .forwarding_to_client;
+                        try self.queueWriteToClient(conn);
+                    } else {
+                        conn.state = .reading_client_request;
+                        try self.queueReadFromClient(conn);
+                    }
+                    return;
+                }
+
+                conn.upstream_data_len = @intCast(result);
+                conn.upstream_data_sent = 0;
+
+                conn.state = .forwarding_to_client;
+                try self.queueWriteToClient(conn);
+            },
+            .forwarding_to_client => {
+                conn.upstream_data_sent += @intCast(result);
+
+                if (conn.upstream_data_sent >= conn.upstream_data_len) {
+                    if (conn.upstream_fd == null) {
+                        conn.state = .reading_client_request;
+                        try self.queueReadFromClient(conn);
+                    } else {
+                        conn.state = .reading_upstream_response;
+                        try self.queueReadFromUpstream(conn);
+                    }
+                } else {
+                    try self.queueWriteToClient(conn);
                 }
             },
         }
@@ -105,14 +179,70 @@ pub const Worker = struct {
         const conn = try self.allocator.create(Connection);
         errdefer self.allocator.destroy(conn);
 
-        //const user_data = self.next_user_data;
-        //self.next_user_data += 1;
-
         conn.* = Connection.init(fd, @intFromPtr(conn));
 
         try self.connections.put(@intFromPtr(conn), conn);
 
-        try self.queueRead(conn); // queue init
+        try self.queueReadFromClient(conn); // queue init
+    }
+
+    fn connectUpstream(self: *Worker) !posix.socket_t {
+        _ = self;
+        return try posix.socket(
+            posix.AF.INET,
+            posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
+            0,
+        );
+    }
+
+    fn _queueConnect(self: *Worker, conn: *Connection) !void {
+        const addr = posix.sockaddr.in{
+            .family = posix.AF.INET,
+            .port = std.mem.nativeToBig(u16, 8080),
+            .addr = std.mem.nativeToBig(u32, 0x7F000001),
+            .zero = [_]u8{0} ** 8,
+        };
+
+        // Call connect directly (non-blocking, will return immediately)
+        _ = posix.connect(
+            conn.upstream_fd.?,
+            @ptrCast(&addr),
+            @sizeOf(@TypeOf(addr)),
+        ) catch |err| {
+            // WouldBlock/InProgress is EXPECTED for non-blocking connect
+            if (err != error.WouldBlock) {
+                //std.debug.print("Connect error: {}\n", .{err});
+                return err;
+            }
+            // WouldBlock is fine, connection is in progress
+        };
+
+        //std.debug.print("Connect initiated (non-blocking)\n", .{});
+
+        // Queue a NOP to signal "connect initiated"
+        const sqe = try self.ring.get_sqe();
+        linux.io_uring_sqe.prep_nop(sqe);
+        sqe.user_data = conn.user_data;
+    }
+
+    fn queueConnect(self: *Worker, conn: *Connection) !void {
+        const sqe = try self.ring.get_sqe();
+
+        const addr = posix.sockaddr.in{
+            .family = posix.AF.INET,
+            .port = std.mem.nativeToBig(u16, 8080),
+            .addr = std.mem.nativeToBig(u32, 0x7F000001),
+            .zero = [_]u8{0} ** 8,
+        };
+
+        linux.io_uring_sqe.prep_connect(
+            sqe,
+            conn.upstream_fd.?,
+            @as(*const posix.sockaddr, @ptrCast(&addr)),
+            @sizeOf(@TypeOf(addr)),
+        );
+
+        sqe.user_data = conn.user_data;
     }
 
     fn queueAccepts(self: *Worker, count: usize) !void {
@@ -131,29 +261,55 @@ pub const Worker = struct {
         }
     }
 
-    fn queueRead(self: *Worker, conn: *Connection) !void {
+    fn queueReadFromClient(self: *Worker, conn: *Connection) !void {
         const sqe = try self.ring.get_sqe();
-        conn.state = .reading;
 
         linux.io_uring_sqe.prep_recv(
             sqe,
-            conn.fd,
-            conn.buf[0..],
+            conn.client_fd,
+            conn.client_buf[0..],
             0,
         );
 
         sqe.user_data = conn.user_data;
     }
 
-    fn queueWrite(self: *Worker, conn: *Connection) !void {
+    fn queueWriteToUpstream(self: *Worker, conn: *Connection) !void {
         const sqe = try self.ring.get_sqe();
-        conn.state = .writing;
 
-        const to_write = conn.buf[conn.bytes_written..conn.bytes_to_write];
+        const to_write = conn.client_buf[conn.client_data_sent..conn.client_data_len];
 
         linux.io_uring_sqe.prep_send(
             sqe,
-            conn.fd,
+            conn.upstream_fd.?,
+            to_write,
+            linux.MSG.NOSIGNAL,
+        );
+
+        sqe.user_data = conn.user_data;
+    }
+
+    fn queueReadFromUpstream(self: *Worker, conn: *Connection) !void {
+        const sqe = try self.ring.get_sqe();
+
+        linux.io_uring_sqe.prep_recv(
+            sqe,
+            conn.upstream_fd.?,
+            conn.upstream_buf[0..],
+            0,
+        );
+
+        sqe.user_data = conn.user_data;
+    }
+
+    fn queueWriteToClient(self: *Worker, conn: *Connection) !void {
+        const sqe = try self.ring.get_sqe();
+
+        const to_write = conn.upstream_buf[conn.upstream_data_sent..conn.upstream_data_len];
+
+        linux.io_uring_sqe.prep_send(
+            sqe,
+            conn.client_fd,
             to_write,
             linux.MSG.NOSIGNAL,
         );
@@ -162,10 +318,12 @@ pub const Worker = struct {
     }
 
     fn closeConnection(self: *Worker, conn: *Connection) !void {
-        // @intFromPtr(conn)
+        posix.close(conn.client_fd);
+        if (conn.upstream_fd) |fd| {
+            posix.close(fd);
+        }
+
         if (self.connections.fetchRemove(@intFromPtr(conn))) |_| {
-            //const conn = kv.value;
-            posix.close(conn.fd);
             self.allocator.destroy(conn);
         }
     }
@@ -173,7 +331,10 @@ pub const Worker = struct {
     pub fn deinit(self: *Worker) void {
         var it = self.connections.valueIterator();
         while (it.next()) |conn| {
-            posix.close(conn.*.fd);
+            posix.close(conn.*.client_fd);
+            if (conn.*.upstream_fd) |fd| {
+                posix.close(fd);
+            }
             self.allocator.destroy(conn.*);
         }
         self.connections.deinit();
@@ -200,6 +361,4 @@ fn pinToCpu(cpu_id: usize) !void {
         0,
         @ptrCast(&set),
     );
-
-    //if (rc != 0) return error.CpuAffinityFailed;
 }

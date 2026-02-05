@@ -42,6 +42,14 @@ pub const Request = struct {
     pub fn deinit(self: *Request) void {
         self.headers.deinit();
     }
+    pub fn getHeader(self: *const Request, name: []const u8) ?[]const u8 {
+        for (self.headers.items) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, name)) {
+                return header.value;
+            }
+        }
+        return null;
+    }
 };
 
 pub const Response = struct {
