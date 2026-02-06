@@ -365,10 +365,9 @@ pub const Worker = struct {
 };
 
 fn pinToCpu(cpu_id: usize) !void {
-    const CPU_SETSIZE = 1024;
-    const cpu_set_t = [CPU_SETSIZE / @bitSizeOf(usize)]usize;
+    // const cpu_set_t = [linux.CPU_SETSIZE / @bitSizeOf(usize)]usize;
 
-    var set: cpu_set_t = undefined;
+    var set: linux.cpu_set_t = undefined;
     @memset(&set, 0);
 
     const idx = cpu_id / @bitSizeOf(usize);

@@ -10,32 +10,25 @@ const WaitingStats = struct {
 };
 
 pub const Connection = struct {
-    last_submit_ns: i128 = 0,
-    waiting: WaitingStats = .{},
-
     client_fd: posix.socket_t,
-    upstream_fd: ?posix.socket_t,
+    upstream_fd: ?posix.socket_t = null,
 
-    client_buf: [BUF_SIZE]u8,
-    upstream_buf: [BUF_SIZE]u8,
+    client_buf: [BUF_SIZE]u8 = undefined,
+    upstream_buf: [BUF_SIZE]u8 = undefined,
 
-    client_data_len: usize,
-    client_data_sent: usize,
-    upstream_data_len: usize,
-    upstream_data_sent: usize,
+    client_buf_len: usize = 0,
+    client_buf_sent: usize = 0,
+    upstream_buf_len: usize = 0,
+    upstream_buf_sent: usize = 0,
 
-    state: State,
+    state: State = .reading_client_request,
     user_data: u64,
-    closing: bool,
+    closing: bool = false,
 
-    upstream_host: ?[]const u8,
-    upstream_port: u16,
-    upstream_addr: posix.sockaddr.in,
+    upstream_addr: posix.sockaddr.in = undefined,
 
-    content_length: usize,
-    transfer_encoding: http.TransferEncoding,
-    connection_state: http.ConnectionState,
-    status: http.Status,
+    request: http.Request = .{},
+    response: http.Response = .{},
 
     pub const State = enum {
         reading_client_request,
@@ -48,23 +41,7 @@ pub const Connection = struct {
     pub fn init(fd: posix.socket_t, user_data: u64) Connection {
         return .{
             .client_fd = fd,
-            .upstream_fd = null,
-            .client_buf = undefined,
-            .upstream_buf = undefined,
-            .client_data_len = 0,
-            .client_data_sent = 0,
-            .upstream_data_len = 0,
-            .upstream_data_sent = 0,
-            .state = .reading_client_request,
             .user_data = user_data,
-            .closing = false,
-            .upstream_host = null,
-            .upstream_port = 80,
-            .upstream_addr = undefined,
-            .content_length = 0,
-            .transfer_encoding = .none,
-            .connection_state = .keep_alive,
-            .status = undefined,
         };
     }
 };
