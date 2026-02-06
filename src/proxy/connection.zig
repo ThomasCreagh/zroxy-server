@@ -1,4 +1,5 @@
 const std = @import("std");
+const http = @import("../http.zig");
 const posix = std.posix;
 
 const BUF_SIZE = 16384; // 16 KB
@@ -31,6 +32,11 @@ pub const Connection = struct {
     upstream_port: u16,
     upstream_addr: posix.sockaddr.in,
 
+    content_length: usize,
+    transfer_encoding: http.TransferEncoding,
+    connection_state: http.ConnectionState,
+    status: http.Status,
+
     pub const State = enum {
         reading_client_request,
         connecting_upstream,
@@ -55,6 +61,10 @@ pub const Connection = struct {
             .upstream_host = null,
             .upstream_port = 80,
             .upstream_addr = undefined,
+            .content_length = 0,
+            .transfer_encoding = .none,
+            .connection_state = .keep_alive,
+            .status = undefined,
         };
     }
 };
