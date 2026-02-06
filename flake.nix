@@ -15,6 +15,8 @@
       buildInputs = with pkgs; [
         zig
         zls
+        wrk
+        nginx
       ];
       shellHook = ''
         export ZIG_GLOBAL_CACHE_DIR="$HOME/.cache/zig"

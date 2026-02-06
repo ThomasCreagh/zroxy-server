@@ -3,7 +3,15 @@ const posix = std.posix;
 
 const BUF_SIZE = 16384; // 16 KB
 
+const WaitingStats = struct {
+    total_ns: i128 = 0,
+    count: usize = 0,
+};
+
 pub const Connection = struct {
+    last_submit_ns: i128 = 0,
+    waiting: WaitingStats = .{},
+
     client_fd: posix.socket_t,
     upstream_fd: ?posix.socket_t,
 
