@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log;
 const Connection = @import("connection.zig").Connection;
 const UpstreamManager = @import("upstream.zig").UpstreamManager;
 const http = @import("../http.zig");
@@ -12,7 +13,9 @@ pub const Worker = struct {
     listen_fd: posix.socket_t,
     worker_id: usize,
     upstream: UpstreamManager,
+    upstream_pool: std.ArrayList(posix.socket_t),
 
+    const MAX_POOL_SIZE = 50;
     const RING_SIZE = 8192;
     const MAX_ACCEPTS_PER_BATCH = 256;
     const CQE_BUF_SIZE = 128;
@@ -25,66 +28,38 @@ pub const Worker = struct {
             .listen_fd = listen_fd,
             .worker_id = worker_id,
             .upstream = UpstreamManager.init("127.0.0.1", 8080),
+            .upstream_pool = try std.ArrayList(posix.socket_t).initCapacity(allocator, MAX_POOL_SIZE),
         };
     }
-
     pub fn run(self: *Worker) !void {
         try pinToCpu(self.worker_id);
         try self.queueAccepts(MAX_ACCEPTS_PER_BATCH);
 
         var cqe_buf: [CQE_BUF_SIZE]linux.io_uring_cqe = undefined;
 
-        var stats_counter: usize = 0;
-        var completions_counter: usize = 0;
-
         while (true) {
-            stats_counter += 1;
+            // submit and wait for at least 1 completion
+            _ = try self.ring.submit_and_wait(1);
 
-            // ALWAYS submit, NEVER wait
-            _ = try self.ring.submit();
+            // get all available completions
+            const cqe_count = try self.ring.copy_cqes(&cqe_buf, 0);
 
-            // Try to get completions
-            const cqe_count = self.ring.copy_cqes(cqe_buf[0..], 0) catch |err| {
-                //std.debug.print("copy_cqes ERROR: {}\n", .{err});
-                return err;
-            };
-
-            if (cqe_count > 0) {
-                //std.debug.print("Got {} cqes\n", .{cqe_count});
-                completions_counter += cqe_count;
-
-                for (cqe_buf[0..cqe_count]) |cqe| {
-                    self.handleCompletion(cqe) catch |err| {
-                        std.debug.print("Handler error: {}\n", .{err});
-                    };
-                }
-            }
-
-            // Print stats every 1M iterations
-            if (stats_counter % 1_000_000 == 0) {
-                //std.debug.print("1M iters, {} completions, {} active conns\n", .{
-                //    completions_counter,
-                //    self.connections.count(),
-                //});
-                completions_counter = 0;
-            }
-
-            // Small yield to not burn CPU on empty loops
-            if (cqe_count == 0) {
-                std.Thread.sleep(100); // 100ns
+            for (cqe_buf[0..cqe_count]) |cqe| {
+                self.handleCompletion(cqe) catch |err| {
+                    log.err("Handler error: {}", .{err});
+                };
             }
         }
     }
 
     fn handleCompletion(self: *Worker, cqe: linux.io_uring_cqe) !void {
+        //log.debug("handleCompletion", .{});
         const user_data = cqe.user_data;
         const result = cqe.res;
 
         if (user_data == 0) {
             if (result >= 0) {
                 try self.addConnection(result);
-            } else {
-                //std.debug.print("Accept error: {}\n", .{result});
             }
             try self.queueAccepts(1);
             return;
@@ -93,11 +68,7 @@ pub const Worker = struct {
         const conn: *Connection = @ptrFromInt(user_data);
         if (conn.closing) return;
 
-        //const cur_state = conn.state;
-        //std.debug.print("CQE: state={s} result={}\n", .{ @tagName(cur_state), result });
-
         if (result < 0) {
-            //std.debug.print("  ERROR: closing connection\n", .{});
             conn.closing = true;
             try self.closeConnection(conn);
             return;
@@ -106,15 +77,15 @@ pub const Worker = struct {
         switch (conn.state) {
             .reading_client_request => {
                 self.onClientRead(conn, result) catch |err| {
-                    std.debug.print("  onClientRead error: {}\n", .{err});
+                    log.err("  onClientRead error: {}\n", .{err});
                     conn.closing = true;
                     self.closeConnection(conn) catch {};
-                    return; // ← RETURN, don't touch conn!
+                    return;
                 };
             },
             .connecting_upstream => {
                 self.onUpstreamConnected(conn, result) catch |err| {
-                    std.debug.print("  onUpstreamConnected error: {}\n", .{err});
+                    log.err("  onUpstreamConnected error: {}\n", .{err});
                     conn.closing = true;
                     self.closeConnection(conn) catch {};
                     return;
@@ -122,168 +93,186 @@ pub const Worker = struct {
             },
             .forwarding_to_upstream => {
                 self.onUpstreamWritten(conn, result) catch |err| {
-                    std.debug.print("  onUpstreamWritten error: {}\n", .{err});
+                    log.err("  onUpstreamWritten error: {}\n", .{err});
                     conn.closing = true;
                     self.closeConnection(conn) catch {};
                     return;
                 };
             },
             .reading_upstream_response => {
-                //std.debug.print("  BEFORE onUpstreamRead\n", .{});
                 self.onUpstreamRead(conn, result) catch |err| {
-                    std.debug.print("  onUpstreamRead error: {}\n", .{err});
+                    log.err("  onUpstreamRead error: {}\n", .{err});
                     conn.closing = true;
                     self.closeConnection(conn) catch {};
                     return;
                 };
-                //std.debug.print("  AFTER onUpstreamRead\n", .{});
             },
             .forwarding_to_client => {
                 self.onClientWritten(conn, result) catch |err| {
-                    std.debug.print("  onClientWritten error: {}\n", .{err});
+                    log.err("  onClientWritten error: {}\n", .{err});
                     conn.closing = true;
                     self.closeConnection(conn) catch {};
                     return;
                 };
             },
         }
-        //std.debug.print("  Handler done\n", .{});
     }
 
     fn onClientRead(self: *Worker, conn: *Connection, bytes: i32) !void {
-        //std.debug.print("onClientRead: fd={} bytes={}\n", .{ conn.client_fd, bytes });
         if (bytes == 0) {
-            //std.debug.print("  → Client closed (0 bytes)\n", .{});
             conn.closing = true;
             try self.closeConnection(conn);
             return;
         }
 
-        conn.client_data_len = @intCast(bytes);
-        conn.client_data_sent = 0;
+        conn.client_buf_len = @intCast(bytes);
+        conn.client_buf_sent = 0;
 
-        try http.parse(conn);
+        try conn.request.parse(conn.client_buf[0..conn.client_buf_len]);
 
-        //std.debug.print("  → Creating upstream connection\n", .{});
+        const upstream = try self.getUpstreamFromPool();
+        conn.upstream_fd = upstream.fd;
 
-        const upstream_fd = try self.upstream.createSocket();
-        conn.upstream_fd = upstream_fd;
-        conn.upstream_addr = self.upstream.getAddress();
-        conn.state = .connecting_upstream;
-
-        //std.debug.print("  → Queueing connect to upstream fd={}\n", .{upstream_fd});
-        try self.queueConnect(conn);
+        if (upstream.is_new) {
+            conn.upstream_addr = self.upstream.getAddress();
+            conn.state = .connecting_upstream;
+            try self.queueConnect(conn);
+        } else {
+            // Already connected, skip to forwarding
+            conn.state = .forwarding_to_upstream;
+            try self.queueWriteToUpstream(conn);
+        }
     }
 
     fn onUpstreamConnected(self: *Worker, conn: *Connection, result: i32) !void {
-        //std.debug.print("onUpstreamConnected: result={}\n", .{result});
+        //log.debug("onUpstreamConnected", .{});
 
         // accept 0 or -EISCONN as success
         if (result != 0 and result != -106) {
-            //std.debug.print("  → Connect FAILED: {}\n", .{result});
             conn.closing = true;
             return self.closeConnection(conn);
         }
 
-        //std.debug.print("  → Connect OK, forwarding {} bytes\n", .{conn.client_data_len});
         conn.state = .forwarding_to_upstream;
         try self.queueWriteToUpstream(conn);
     }
 
     fn onUpstreamWritten(self: *Worker, conn: *Connection, bytes: i32) !void {
-        //std.debug.print("onUpstreamWritten: {} bytes\n", .{bytes});
+        //log.debug("onUpstreamWritten", .{});
+        conn.client_buf_sent += @intCast(bytes);
 
-        conn.client_data_sent += @intCast(bytes);
-
-        if (conn.client_data_sent >= conn.client_data_len) {
-            //std.debug.print("  → Request sent, reading response\n", .{});
-            // start reading response
+        if (conn.client_buf_sent >= conn.client_buf_len) {
             conn.state = .reading_upstream_response;
-            conn.upstream_data_len = 0;
-            conn.upstream_data_sent = 0;
+            conn.upstream_buf_len = 0;
+            conn.upstream_buf_sent = 0;
             try self.queueReadFromUpstream(conn);
         } else {
-            // continue writing
             try self.queueWriteToUpstream(conn);
         }
     }
 
     fn onUpstreamRead(self: *Worker, conn: *Connection, bytes: i32) !void {
-        //std.debug.print("onUpstreamRead ENTER: bytes={}\n", .{bytes});
+        //log.debug("onUpstreamRead", .{});
         if (bytes == 0) {
-            //std.debug.print("  Upstream EOF\n", .{});
-            // upstream closed, close upstream but keep client alive
+            // EOF from upstream
             if (conn.upstream_fd) |fd| {
+                //log.debug("onUpstreamRead: close fd", .{});
                 posix.close(fd);
                 conn.upstream_fd = null;
             }
 
-            if (conn.upstream_data_len > 0) {
-                // send remaining data
+            if (conn.upstream_buf_len > 0) {
+                //log.debug("onUpstreamRead: write to client", .{});
                 conn.state = .forwarding_to_client;
                 try self.queueWriteToClient(conn);
             } else {
-                // ready for next request
+                //log.debug("onUpstreamRead: read next client request", .{});
                 conn.state = .reading_client_request;
+                conn.request = .{};
+                conn.response = .{};
                 try self.queueReadFromClient(conn);
             }
             return;
         }
 
-        //std.debug.print("  Setting upstream_data_len={}\n", .{bytes});
-        conn.upstream_data_len = @intCast(bytes);
-        conn.upstream_data_sent = 0;
-        conn.state = .forwarding_to_client;
+        conn.upstream_buf_len += @intCast(bytes);
+        conn.response.bytes_received += @intCast(bytes);
 
-        //std.debug.print("  Queueing write to client\n", .{});
+        if (!conn.response.headers_complete) {
+            const data = conn.upstream_buf[0..conn.upstream_buf_len];
+
+            //log.debug("onUpstreamRead: parse headers", .{});
+            try conn.response.parse(data);
+
+            if (!conn.response.headers_complete) {
+                //log.debug("onUpstreamRead: headers not complete", .{});
+                try self.queueReadFromUpstream(conn);
+                return;
+            }
+        }
+
+        conn.upstream_buf_sent = 0;
+        conn.state = .forwarding_to_client;
         try self.queueWriteToClient(conn);
-        //std.debug.print("onUpstreamRead EXIT\n", .{});
     }
 
     fn onClientWritten(self: *Worker, conn: *Connection, bytes: i32) !void {
-        //std.debug.print("onClientWritten: {} bytes\n", .{bytes});
-        conn.upstream_data_sent += @intCast(bytes);
-        if (conn.upstream_data_sent >= conn.upstream_data_len) {
-            //std.debug.print("  → Response fully sent\n", .{});
+        conn.upstream_buf_sent += @intCast(bytes);
 
-            // Close upstream after each request (for now)
-            if (conn.upstream_fd) |fd| {
-                posix.close(fd);
-                conn.upstream_fd = null;
+        if (conn.upstream_buf_sent >= conn.upstream_buf_len) {
+            const response_complete = blk: {
+                if (conn.response.is_chunked) {
+                    break :blk false;
+                } else if (conn.response.content_length) |expected| {
+                    const body_received = conn.response.bytes_received - conn.response.headers_end_pos;
+                    break :blk body_received >= expected;
+                } else {
+                    break :blk false;
+                }
+            };
+
+            if (response_complete) {
+                if (conn.upstream_fd) |fd| {
+                    self.returnUpstreamToPool(fd);
+                    conn.upstream_fd = null;
+                }
+
+                conn.state = .reading_client_request;
+                conn.request = .{};
+                conn.response = .{};
+                conn.client_buf_len = 0;
+                conn.upstream_buf_len = 0;
+                try self.queueReadFromClient(conn);
+            } else {
+                conn.state = .reading_upstream_response;
+                conn.upstream_buf_len = 0;
+                try self.queueReadFromUpstream(conn);
             }
-
-            // Go back to client
-            conn.state = .reading_client_request;
-            try self.queueReadFromClient(conn);
         } else {
             try self.queueWriteToClient(conn);
         }
-
-        //if (conn.upstream_data_sent >= conn.upstream_data_len) {
-        //    //std.debug.print("  → Response fully sent\n", .{});
-        //    // response sent
-        //    if (conn.upstream_fd) |_| {
-        //        //std.debug.print("  → Keep-alive: reading more from upstream\n", .{});
-        //        // keep-alive: read more from upstream
-        //        conn.state = .reading_upstream_response;
-        //        try self.queueReadFromUpstream(conn);
-        //    } else {
-        //        //std.debug.print("  → Upstream closed, waiting for next request\n", .{});
-        //        // upstream closed, wait for next client request
-        //        conn.state = .reading_client_request;
-        //        try self.queueReadFromClient(conn);
-        //    }
-        //} else {
-        //    //std.debug.print("  → Partial write, continuing\n", .{});
-        //    // continue writing
-        //    try self.queueWriteToClient(conn);
-        //}
+    }
+    fn getUpstreamFromPool(self: *Worker) !struct { fd: posix.socket_t, is_new: bool } {
+        if (self.upstream_pool.pop()) |fd| {
+            return .{ .fd = fd, .is_new = false };
+        }
+        const fd = try self.upstream.createSocket();
+        const flag: c_int = 1;
+        try posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&flag));
+        return .{ .fd = fd, .is_new = true };
     }
 
-    // queue operations
-    fn addConnection(self: *Worker, fd: i32) !void {
-        //std.debug.print("ADD conn fd={}\n", .{fd});
+    fn returnUpstreamToPool(self: *Worker, fd: posix.socket_t) void {
+        if (self.upstream_pool.items.len < MAX_POOL_SIZE) {
+            self.upstream_pool.append(self.allocator, fd) catch {
+                posix.close(fd);
+            };
+        } else {
+            posix.close(fd);
+        }
+    }
 
+    fn addConnection(self: *Worker, fd: i32) !void {
         const conn = try self.allocator.create(Connection);
         conn.* = Connection.init(fd, @intFromPtr(conn));
         try self.connections.put(@intFromPtr(conn), conn);
@@ -323,27 +312,26 @@ pub const Worker = struct {
 
     fn queueWriteToUpstream(self: *Worker, conn: *Connection) !void {
         const sqe = try self.ring.get_sqe();
-        const data = conn.client_buf[conn.client_data_sent..conn.client_data_len];
+        const data = conn.client_buf[conn.client_buf_sent..conn.client_buf_len];
         linux.io_uring_sqe.prep_send(sqe, conn.upstream_fd.?, data, linux.MSG.NOSIGNAL);
         sqe.user_data = conn.user_data;
     }
 
     fn queueReadFromUpstream(self: *Worker, conn: *Connection) !void {
         const sqe = try self.ring.get_sqe();
-        linux.io_uring_sqe.prep_recv(sqe, conn.upstream_fd.?, conn.upstream_buf[0..], 0);
+        const offset = conn.upstream_buf_len;
+        linux.io_uring_sqe.prep_recv(sqe, conn.upstream_fd.?, conn.upstream_buf[offset..], 0);
         sqe.user_data = conn.user_data;
     }
 
     fn queueWriteToClient(self: *Worker, conn: *Connection) !void {
         const sqe = try self.ring.get_sqe();
-        const data = conn.upstream_buf[conn.upstream_data_sent..conn.upstream_data_len];
+        const data = conn.upstream_buf[conn.upstream_buf_sent..conn.upstream_buf_len];
         linux.io_uring_sqe.prep_send(sqe, conn.client_fd, data, linux.MSG.NOSIGNAL);
         sqe.user_data = conn.user_data;
     }
 
     fn closeConnection(self: *Worker, conn: *Connection) !void {
-        //std.debug.print("CLOSE conn fd={}\n", .{conn.client_fd});
-
         posix.close(conn.client_fd);
         if (conn.upstream_fd) |fd| posix.close(fd);
 
@@ -365,8 +353,6 @@ pub const Worker = struct {
 };
 
 fn pinToCpu(cpu_id: usize) !void {
-    // const cpu_set_t = [linux.CPU_SETSIZE / @bitSizeOf(usize)]usize;
-
     var set: linux.cpu_set_t = undefined;
     @memset(&set, 0);
 

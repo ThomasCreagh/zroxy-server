@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log;
 const mem = std.mem;
 const startsWithIgnoreCase = std.ascii.startsWithIgnoreCase;
 const Connection = @import("proxy/connection.zig").Connection;
@@ -51,7 +52,7 @@ pub const Request = struct {
         var status_it = mem.splitScalar(u8, line, ' ');
         _ = status_it.next().?; // skip HTTP method
 
-        self.path = try std.fmt.parseInt(u16, status_it.next().?, 10);
+        self.path = status_it.next().?;
     }
 
     fn parseHeader(self: *Request, line: []const u8) !void {
@@ -60,14 +61,14 @@ pub const Request = struct {
         } else if (startsWithIgnoreCase(line, "transfer-encoding:")) {
             try self.parseTransferEncoding(mem.trim(u8, line[18..], "\t "));
         } else if (startsWithIgnoreCase(line, "connection:")) {
-            try self.parseResponseConnection(mem.trim(u8, line[11..], "\t "));
+            try self.parseConnection(mem.trim(u8, line[11..], "\t "));
         } else if (startsWithIgnoreCase(line, "host:")) {
-            try self.parseResponseConnection(mem.trim(u8, line[5..], "\t "));
+            try self.parseConnection(mem.trim(u8, line[5..], "\t "));
         }
     }
 
     fn parseContentLength(self: *Request, value: []const u8) !void {
-        self.content_length = std.fmt.parseInt(u8, value, 10) catch {
+        self.content_length = std.fmt.parseInt(usize, value, 10) catch {
             return ParseError.BadContentLength;
         };
     }
@@ -77,13 +78,13 @@ pub const Request = struct {
     }
 
     fn parseConnection(self: *Request, value: []const u8) !void {
-        self.keep_alive = mem.eq(u8, value, "keep-alive");
+        self.keep_alive = mem.eql(u8, value, "keep-alive");
     }
 
     fn parseHost(self: *Request, value: []const u8) !void {
         if (mem.indexOf(u8, value, ":")) |colon_pos| {
             self.host = value[0..colon_pos];
-            self.port = std.fmt.parseInt(u8, value[colon_pos + 1 ..], 10) catch 80;
+            self.port = std.fmt.parseInt(u16, value[colon_pos + 1 ..], 10) catch 80;
         } else {
             self.host = value;
             self.port = 80;
@@ -101,13 +102,24 @@ pub const Response = struct {
     headers_end_pos: usize = 0,
 
     pub fn parse(self: *Response, data: []const u8) !void {
-        const headers_end = mem.indexOf(u8, data, "\r\n\r\n") orelse {
-            self.headers_complete = false;
-            return;
-        };
+        var headers_end: usize = undefined;
+        var headers_end_len: usize = undefined;
+
+        if (mem.indexOf(u8, data, "\r\n\r\n")) |num_4| {
+            headers_end = num_4;
+            headers_end_len = 4;
+        } else {
+            if (mem.indexOf(u8, data, "\n\n")) |num_2| {
+                headers_end = num_2;
+                headers_end_len = 2;
+            } else {
+                self.headers_complete = false;
+                return;
+            }
+        }
 
         self.headers_complete = true;
-        self.headers_end_pos = headers_end + 4; // + \r\n\r\n
+        self.headers_end_pos = headers_end + headers_end_len; // + \r\n\r\n or \n\n
 
         const headers = data[0..headers_end];
         var lines = mem.splitScalar(u8, headers, '\n');
@@ -116,7 +128,12 @@ pub const Response = struct {
         try self.parseStatusLine(status_line);
 
         while (lines.next()) |line| {
-            const trimmed = line[0 .. line.len - 1];
+            var trimmed: []const u8 = undefined;
+            if (headers_end_len == 4) {
+                trimmed = line[0 .. line.len - 1];
+            } else {
+                trimmed = line[0..line.len];
+            }
             if (trimmed.len == 0) continue;
             try self.parseHeader(trimmed);
         }
@@ -136,12 +153,12 @@ pub const Response = struct {
         } else if (startsWithIgnoreCase(line, "transfer-encoding:")) {
             try self.parseTransferEncoding(mem.trim(u8, line[18..], "\t "));
         } else if (startsWithIgnoreCase(line, "connection:")) {
-            try self.parseResponseConnection(mem.trim(u8, line[11..], "\t "));
+            try self.parseConnection(mem.trim(u8, line[11..], "\t "));
         }
     }
 
     fn parseContentLength(self: *Response, value: []const u8) !void {
-        self.content_length = std.fmt.parseInt(u8, value, 10) catch {
+        self.content_length = std.fmt.parseInt(usize, value, 10) catch {
             return ParseError.BadContentLength;
         };
     }
@@ -151,6 +168,6 @@ pub const Response = struct {
     }
 
     fn parseConnection(self: *Response, value: []const u8) !void {
-        self.keep_alive = mem.eq(u8, value, "keep-alive");
+        self.keep_alive = mem.eql(u8, value, "keep-alive");
     }
 };

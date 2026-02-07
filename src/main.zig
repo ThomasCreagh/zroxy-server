@@ -6,6 +6,10 @@ const PORT = 8081;
 const RING_PER_WORKER = 4096;
 const WORKERS = 6;
 
+pub const std_options: std.Options = .{
+    .log_level = .err,
+};
+
 pub fn main() !void {
     std.debug.print("server started on port {}...\n", .{PORT});
 
@@ -24,7 +28,6 @@ pub fn main() !void {
 
     std.debug.print("Server listening on port {}\n", .{PORT});
     std.debug.print("Workers: {}\n", .{server.workers.len});
-    std.debug.print("Ring size per worker: {}\n", .{RING_PER_WORKER});
 
     try server.run();
 
