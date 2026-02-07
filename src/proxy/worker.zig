@@ -19,9 +19,8 @@ pub const Worker = struct {
     const RING_SIZE = 8192;
     const MAX_ACCEPTS_PER_BATCH = 256;
     const CQE_BUF_SIZE = 128;
-
     pub fn init(allocator: std.mem.Allocator, listen_fd: posix.socket_t, worker_id: usize) !Worker {
-        return .{
+        var worker = Worker{
             .ring = try linux.IoUring.init(RING_SIZE, 0),
             .connections = std.AutoHashMap(u64, *Connection).init(allocator),
             .allocator = allocator,
@@ -30,18 +29,48 @@ pub const Worker = struct {
             .upstream = UpstreamManager.init("127.0.0.1", 8080),
             .upstream_pool = try std.ArrayList(posix.socket_t).initCapacity(allocator, MAX_POOL_SIZE),
         };
+
+        const prewarm_count = 20;
+        for (0..prewarm_count) |_| {
+            const fd = worker.upstream.createSocket() catch |err| {
+                log.warn("Failed to create prewarm socket: {}", .{err});
+                break;
+            };
+
+            const flag: c_int = 1;
+            posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&flag)) catch {
+                posix.close(fd);
+                continue;
+            };
+
+            const addr = worker.upstream.getAddress();
+            posix.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) catch |err| {
+                log.warn("Failed to prewarm connection: {}", .{err});
+                posix.close(fd);
+                break;
+            };
+
+            worker.upstream_pool.append(allocator, fd) catch {
+                posix.close(fd);
+                break;
+            };
+        }
+
+        log.info("Worker {} initialized with {} pre-warmed connections", .{ worker_id, worker.upstream_pool.items.len });
+
+        return worker;
     }
+
     pub fn run(self: *Worker) !void {
         try pinToCpu(self.worker_id);
-        try self.queueAccepts(MAX_ACCEPTS_PER_BATCH);
+
+        // Queue ONE multishot accept instead of 256 regular accepts
+        try self.queueMultishotAccept();
 
         var cqe_buf: [CQE_BUF_SIZE]linux.io_uring_cqe = undefined;
 
         while (true) {
-            // submit and wait for at least 1 completion
             _ = try self.ring.submit_and_wait(1);
-
-            // get all available completions
             const cqe_count = try self.ring.copy_cqes(&cqe_buf, 0);
 
             for (cqe_buf[0..cqe_count]) |cqe| {
@@ -61,7 +90,6 @@ pub const Worker = struct {
             if (result >= 0) {
                 try self.addConnection(result);
             }
-            try self.queueAccepts(1);
             return;
         }
 
@@ -290,18 +318,16 @@ pub const Worker = struct {
         sqe.user_data = conn.user_data;
     }
 
-    fn queueAccepts(self: *Worker, count: usize) !void {
-        for (0..count) |_| {
-            const sqe = try self.ring.get_sqe();
-            linux.io_uring_sqe.prep_accept(
-                sqe,
-                self.listen_fd,
-                null,
-                null,
-                posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
-            );
-            sqe.user_data = 0;
-        }
+    fn queueMultishotAccept(self: *Worker) !void {
+        const sqe = try self.ring.get_sqe();
+        linux.io_uring_sqe.prep_multishot_accept(
+            sqe,
+            self.listen_fd,
+            null,
+            null,
+            0,
+        );
+        sqe.user_data = 0;
     }
 
     fn queueReadFromClient(self: *Worker, conn: *Connection) !void {
