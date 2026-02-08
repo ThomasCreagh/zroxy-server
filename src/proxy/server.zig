@@ -19,7 +19,7 @@ pub const Server = struct {
 
         for (listening_sockets, 0..) |*socket, i| {
             socket.* = try createListenSocket(port);
-            std.debug.print("Created listen socket {} on port {}\n", .{ i, port });
+            std.log.info("Created listen socket {} on port {}\n", .{ i, port });
         }
 
         for (workers, 0..) |*worker, i| {

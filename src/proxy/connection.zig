@@ -25,6 +25,9 @@ pub const Connection = struct {
     user_data: u64,
     closing: bool = false,
 
+    body_bytes_spliced: usize = 0,
+    using_splice: bool = false,
+
     upstream_addr: posix.sockaddr.in = undefined,
 
     request: http.Request = .{},
@@ -36,6 +39,7 @@ pub const Connection = struct {
         forwarding_to_upstream,
         reading_upstream_response,
         forwarding_to_client,
+        splicing_to_client,
     };
 
     pub fn init(fd: posix.socket_t, user_data: u64) Connection {

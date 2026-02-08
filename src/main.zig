@@ -7,11 +7,16 @@ const RING_PER_WORKER = 4096;
 const WORKERS = 6;
 
 pub const std_options: std.Options = .{
-    .log_level = .err,
+    .log_level = .info,
 };
 
 pub fn main() !void {
-    std.debug.print("server started on port {}...\n", .{PORT});
+    var buf: [256]u8 = undefined;
+    var stdout_impl = std.fs.File.stdout().writer(&buf);
+    const stdout = &stdout_impl.interface;
+
+    try stdout.print("server started on port {}...\n", .{PORT});
+    try stdout.flush();
 
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
@@ -20,19 +25,14 @@ pub fn main() !void {
         if (deinit_status == .leak) std.testing.expect(false) catch @panic("TEST FAIL");
     }
 
-    //const cpu_count = try std.Thread.getCpuCount();
-    std.debug.print("CPU has {} cpus\n", .{WORKERS});
-
     var server = try Server.init(allocator, PORT, WORKERS);
     defer server.deinit();
 
-    std.debug.print("Server listening on port {}\n", .{PORT});
-    std.debug.print("Workers: {}\n", .{server.workers.len});
+    try stdout.print("Server listening on port {}\n", .{PORT});
+    try stdout.print("Workers: {}\n", .{server.workers.len});
+    try stdout.flush();
 
     try server.run();
-
-    //const server_socket = try set_up_server_socket(PORT, 10);
-    //defer posix.close(server_socket);
 }
 
 fn set_up_server_socket(port: u16, backlog: u31) !posix.socket_t {
