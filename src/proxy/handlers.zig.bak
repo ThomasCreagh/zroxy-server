@@ -1,8 +1,12 @@
 const std = @import("std");
+const http = @import("../http.zig");
+const cache_mod = @import("caching.zig");
+const tunnel = @import("tunnel.zig");
 const Worker = @import("worker.zig").Worker;
 const Connection = @import("connection.zig").Connection;
 
 const posix = std.posix;
+const log = std.log;
 
 pub fn onClientRead(self: *Worker, conn: *Connection, bytes: i32) !void {
     if (bytes == 0) {
@@ -10,36 +14,81 @@ pub fn onClientRead(self: *Worker, conn: *Connection, bytes: i32) !void {
         try self.closeConnection(conn);
         return;
     }
-
     conn.client_buf_len = @intCast(bytes);
     conn.client_buf_sent = 0;
-
     try conn.request.parse(conn.client_buf[0..conn.client_buf_len]);
 
     const host = conn.request.host orelse return error.NoHostHeader;
     const port = conn.request.port;
 
+    if (conn.request.method == .CONNECT) {
+        log.debug("CONNECT request to {s}:{}", .{ host, port });
+
+        conn.upstream_addr = try self.upstream.resolveHost(host, port);
+        const upstream = try self.getUpstreamFromPool();
+        conn.upstream_fd = upstream.fd;
+
+        if (upstream.is_new) {
+            conn.state = .connecting_upstream;
+            try self.queueConnect(conn);
+        } else {
+            try tunnel.sendConnectResponse(self, conn);
+        }
+        return;
+    }
+
+    const cache_key = cache_mod.makeCacheKey(
+        conn.request.host orelse return error.NoHostHeader,
+        conn.request.path,
+    );
+
+    if (self.cache.get(cache_key)) |entry| {
+        try serveCachedResponse(self, conn, entry.*);
+        return;
+    }
+
+    conn.upstream_addr = try self.upstream.resolveHost(host, port);
+
     const upstream = try self.getUpstreamFromPool();
     conn.upstream_fd = upstream.fd;
-
     if (upstream.is_new) {
-        conn.upstream_addr = try self.upstream.resolveHost(host, port);
         conn.state = .connecting_upstream;
         try self.queueConnect(conn);
     } else {
-        // Already connected, skip to forwarding
         conn.state = .forwarding_to_upstream;
         try self.queueWriteToUpstream(conn);
     }
 }
 
-pub fn onUpstreamConnected(self: *Worker, conn: *Connection, result: i32) !void {
-    //log.debug("onUpstreamConnected", .{});
+fn serveCachedResponse(worker: *Worker, conn: *Connection, entry: cache_mod.CacheEntry) !void {
+    @memcpy(
+        conn.upstream_buf[0..entry.response_headers.len],
+        entry.response_headers,
+    );
+    @memcpy(
+        conn.upstream_buf[entry.response_headers.len .. entry.response_headers.len + entry.response_body.len],
+        entry.response_body,
+    );
 
+    conn.upstream_buf_len = entry.response_headers.len + entry.response_body.len;
+    conn.upstream_buf_sent = 0;
+    conn.response.headers_complete = true;
+    conn.response.content_length = entry.content_length;
+
+    conn.state = .forwarding_to_client;
+    try worker.queueWriteToClient(conn);
+}
+
+pub fn onUpstreamConnected(self: *Worker, conn: *Connection, result: i32) !void {
     // accept 0 or -EISCONN as success
     if (result != 0 and result != -106) {
         conn.closing = true;
         return self.closeConnection(conn);
+    }
+
+    if (conn.request.method == .CONNECT) {
+        try tunnel.sendConnectResponse(self, conn);
+        return;
     }
 
     conn.state = .forwarding_to_upstream;
@@ -128,6 +177,10 @@ pub fn onClientWritten(self: *Worker, conn: *Connection, bytes: i32) !void {
     conn.upstream_buf_sent += @intCast(bytes);
 
     if (conn.upstream_buf_sent >= conn.upstream_buf_len) {
+        if (conn.request.method == .CONNECT and conn.state == .forwarding_to_client) {
+            try tunnel.startTunnel(self, conn);
+            return;
+        }
         const response_complete = blk: {
             if (conn.response.is_chunked) {
                 break :blk false;
@@ -140,6 +193,10 @@ pub fn onClientWritten(self: *Worker, conn: *Connection, bytes: i32) !void {
         };
 
         if (response_complete) {
+            if (cache_mod.shouldCache(conn.response.status, .GET)) {
+                try storeCachedResponse(self, conn);
+            }
+
             if (conn.upstream_fd) |fd| {
                 self.returnUpstreamToPool(fd);
                 conn.upstream_fd = null;
@@ -150,6 +207,8 @@ pub fn onClientWritten(self: *Worker, conn: *Connection, bytes: i32) !void {
             conn.response = .{};
             conn.client_buf_len = 0;
             conn.upstream_buf_len = 0;
+            conn.body_bytes_spliced = 0;
+            conn.using_splice = false;
             try self.queueReadFromClient(conn);
         } else {
             conn.state = .reading_upstream_response;
@@ -159,6 +218,25 @@ pub fn onClientWritten(self: *Worker, conn: *Connection, bytes: i32) !void {
     } else {
         try self.queueWriteToClient(conn);
     }
+}
+
+fn storeCachedResponse(worker: *Worker, conn: *Connection) !void {
+    const cache_key = cache_mod.makeCacheKey(
+        conn.request.host orelse return error.NoHostHeader,
+        conn.request.path,
+    );
+
+    const headers = try worker.allocator.dupe(u8, conn.upstream_buf[0..conn.response.headers_end_pos]);
+    const body_len = conn.response.bytes_received - conn.response.headers_end_pos;
+    const body = try worker.allocator.dupe(u8, conn.upstream_buf[conn.response.headers_end_pos .. conn.response.headers_end_pos + body_len]);
+    const entry = cache_mod.CacheEntry{
+        .response_headers = headers,
+        .response_body = body,
+        .content_length = body_len,
+        .status_code = @intFromEnum(conn.response.status),
+        .timestamp = std.time.timestamp(),
+    };
+    try worker.cache.put(cache_key, entry);
 }
 
 pub fn onSpliceCompleted(self: *Worker, conn: *Connection, bytes: i32) !void {

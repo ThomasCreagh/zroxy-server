@@ -1,6 +1,7 @@
 const std = @import("std");
 const operations = @import("operations.zig");
 const handlers = @import("handlers.zig");
+const cache_mod = @import("caching.zig");
 const http = @import("../http.zig");
 const Connection = @import("connection.zig").Connection;
 const UpstreamManager = @import("upstream.zig").UpstreamManager;
@@ -17,6 +18,7 @@ pub const Worker = struct {
     worker_id: usize,
     upstream: UpstreamManager,
     upstream_pool: std.ArrayList(posix.socket_t),
+    cache: cache_mod.Cache,
 
     const MAX_POOL_SIZE = 50;
     const RING_SIZE = 8192;
@@ -29,8 +31,9 @@ pub const Worker = struct {
             .allocator = allocator,
             .listen_fd = listen_fd,
             .worker_id = worker_id,
-            .upstream = UpstreamManager.init("127.0.0.1", 8080),
+            .upstream = UpstreamManager.init(allocator),
             .upstream_pool = try std.ArrayList(posix.socket_t).initCapacity(allocator, MAX_POOL_SIZE),
+            .cache = try cache_mod.Cache.init(allocator, 100 * 1024 * 1024),
         };
     }
 
@@ -174,6 +177,7 @@ pub const Worker = struct {
         }
         self.connections.deinit();
         self.ring.deinit();
+        self.cache.deinit();
     }
 
     // handelers

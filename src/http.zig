@@ -14,11 +14,26 @@ const ParseError = error{
 };
 
 pub const Status = std.http.Status;
+pub const Method = std.http.Method;
+
+fn parseMethod(s: []const u8) ?std.http.Method {
+    if (mem.eql(u8, s, "GET")) return Method.GET;
+    if (std.mem.eql(u8, s, "POST")) return Method.POST;
+    if (mem.eql(u8, s, "PUT")) return Method.PUT;
+    if (mem.eql(u8, s, "DELETE")) return Method.DELETE;
+    if (mem.eql(u8, s, "HEAD")) return Method.HEAD;
+    if (mem.eql(u8, s, "PATCH")) return Method.PATCH;
+    if (mem.eql(u8, s, "OPTIONS")) return Method.OPTIONS;
+    if (mem.eql(u8, s, "CONNECT")) return Method.CONNECT;
+    if (mem.eql(u8, s, "TRACE")) return Method.TRACE;
+    return null;
+}
 
 pub const Request = struct {
     host: ?[]const u8 = null,
     port: u16 = 80,
     path: []const u8 = undefined,
+    method: Method = Method.GET,
     headers_complete: bool = false,
     content_length: ?usize = null,
     is_chunked: bool = false,
@@ -50,8 +65,7 @@ pub const Request = struct {
 
     fn parseStatusLine(self: *Request, line: []const u8) !void {
         var status_it = mem.splitScalar(u8, line, ' ');
-        _ = status_it.next().?; // skip HTTP method
-
+        self.method = parseMethod(status_it.next().?).?;
         self.path = status_it.next().?;
     }
 
@@ -63,7 +77,7 @@ pub const Request = struct {
         } else if (startsWithIgnoreCase(line, "connection:")) {
             try self.parseConnection(mem.trim(u8, line[11..], "\t "));
         } else if (startsWithIgnoreCase(line, "host:")) {
-            try self.parseConnection(mem.trim(u8, line[5..], "\t "));
+            try self.parseHost(mem.trim(u8, line[5..], "\t "));
         }
     }
 

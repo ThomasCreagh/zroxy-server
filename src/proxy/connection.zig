@@ -4,9 +4,12 @@ const posix = std.posix;
 
 const BUF_SIZE = 16384; // 16 KB
 
-const WaitingStats = struct {
-    total_ns: i128 = 0,
-    count: usize = 0,
+pub const TunnelOp = enum(u4) {
+    none = 0,
+    read_client = 1,
+    write_upstream = 2,
+    read_upstream = 3,
+    write_client = 4,
 };
 
 pub const Connection = struct {
@@ -14,10 +17,10 @@ pub const Connection = struct {
     upstream_fd: ?posix.socket_t = null,
 
     client_buf: [BUF_SIZE]u8 = undefined,
-    upstream_buf: [BUF_SIZE]u8 = undefined,
-
     client_buf_len: usize = 0,
     client_buf_sent: usize = 0,
+
+    upstream_buf: [BUF_SIZE]u8 = undefined,
     upstream_buf_len: usize = 0,
     upstream_buf_sent: usize = 0,
 
@@ -32,6 +35,21 @@ pub const Connection = struct {
 
     request: http.Request = .{},
     response: http.Response = .{},
+
+    pub fn encodeUserData(ptr: *Connection, op: TunnelOp) u64 {
+        const addr = @intFromPtr(ptr);
+        const op_bits: u64 = @intFromEnum(op);
+        return (addr & 0xFFFFFFFFFFFFFFF0) | op_bits;
+    }
+
+    pub fn decodeUserData(user_data: u64) struct { ptr: *Connection, op: TunnelOp } {
+        const addr = user_data & 0xFFFFFFFFFFFFFFF0;
+        const op_bits: u4 = @truncate(user_data & 0xF);
+        return .{
+            .ptr = @ptrFromInt(addr),
+            .op = @enumFromInt(op_bits),
+        };
+    }
 
     pub const State = enum {
         reading_client_request,
