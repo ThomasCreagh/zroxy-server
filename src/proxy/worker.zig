@@ -40,7 +40,7 @@ pub const Worker = struct {
 
     pub fn run(self: *Worker) !void {
         try pinToCpu(self.worker_id);
-        try self.queueMultishotAccept();
+        try operations.queueMultishotAccept(self);
 
         var cqe_buf: [CQE_BUF_SIZE]linux.io_uring_cqe = undefined;
 
@@ -66,7 +66,7 @@ pub const Worker = struct {
                 try self.addConnection(result);
             } else {
                 log.warn("Multishot accept ended: {}, re-queuing", .{result});
-                try self.queueMultishotAccept();
+                try operations.queueMultishotAccept(self);
             }
             return;
         }
@@ -91,22 +91,22 @@ pub const Worker = struct {
                 return;
             }
             switch (op) {
-                .read_client => self.onTunnelClientRead(conn, result) catch |err| {
+                .read_client => handlers.onTunnelClientRead(self, conn, result) catch |err| {
                     log.err("onTunnelClientRead: {}", .{err});
                     conn.closing = true;
                     if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
                 },
-                .write_upstream => self.onTunnelUpstreamWritten(conn, result) catch |err| {
+                .write_upstream => handlers.onTunnelUpstreamWritten(self, conn, result) catch |err| {
                     log.err("onTunnelUpstreamWritten: {}", .{err});
                     conn.closing = true;
                     if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
                 },
-                .read_upstream => self.onTunnelUpstreamRead(conn, result) catch |err| {
+                .read_upstream => handlers.onTunnelUpstreamRead(self, conn, result) catch |err| {
                     log.err("onTunnelUpstreamRead: {}", .{err});
                     conn.closing = true;
                     if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
                 },
-                .write_client => self.onTunnelClientWritten(conn, result) catch |err| {
+                .write_client => handlers.onTunnelClientWritten(self, conn, result) catch |err| {
                     log.err("onTunnelClientWritten: {}", .{err});
                     conn.closing = true;
                     if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
@@ -123,32 +123,32 @@ pub const Worker = struct {
         }
 
         switch (conn.state) {
-            .reading_client_request => self.onClientRead(conn, result) catch |err| {
+            .reading_client_request => handlers.onClientRead(self, conn, result) catch |err| {
                 log.err("onClientRead: {}", .{err});
                 conn.closing = true;
                 if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
             },
-            .connecting_upstream => self.onUpstreamConnected(conn, result) catch |err| {
+            .connecting_upstream => handlers.onUpstreamConnected(self, conn, result) catch |err| {
                 log.err("onUpstreamConnected: {}", .{err});
                 conn.closing = true;
                 if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
             },
-            .forwarding_to_upstream => self.onUpstreamWritten(conn, result) catch |err| {
+            .forwarding_to_upstream => handlers.onUpstreamWritten(self, conn, result) catch |err| {
                 log.err("onUpstreamWritten: {}", .{err});
                 conn.closing = true;
                 if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
             },
-            .reading_upstream_response => self.onUpstreamRead(conn, result) catch |err| {
+            .reading_upstream_response => handlers.onUpstreamRead(self, conn, result) catch |err| {
                 log.err("onUpstreamRead: {}", .{err});
                 conn.closing = true;
                 if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
             },
-            .forwarding_to_client => self.onClientWritten(conn, result) catch |err| {
+            .forwarding_to_client => handlers.onClientWritten(self, conn, result) catch |err| {
                 log.err("onClientWritten: {}", .{err});
                 conn.closing = true;
                 if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
             },
-            .splicing_to_client => self.onSpliceCompleted(conn, result) catch |err| {
+            .splicing_to_client => handlers.onSpliceCompleted(self, conn, result) catch |err| {
                 log.err("onSpliceCompleted: {}", .{err});
                 conn.closing = true;
                 if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
@@ -181,7 +181,7 @@ pub const Worker = struct {
         const conn = try self.allocator.create(Connection);
         conn.* = Connection.init(fd, @intFromPtr(conn));
         try self.connections.put(@intFromPtr(conn), conn);
-        try self.queueReadFromClient(conn);
+        try operations.queueReadFromClient(self, conn);
     }
 
     pub fn closeConnection(self: *Worker, conn: *Connection) !void {
@@ -212,71 +212,6 @@ pub const Worker = struct {
         self.connections.deinit();
         self.ring.deinit();
         self.cache.deinit();
-    }
-
-    pub inline fn onClientRead(self: *Worker, conn: *Connection, bytes: i32) !void {
-        return handlers.onClientRead(self, conn, bytes);
-    }
-    pub inline fn onUpstreamConnected(self: *Worker, conn: *Connection, bytes: i32) !void {
-        return handlers.onUpstreamConnected(self, conn, bytes);
-    }
-    pub inline fn onUpstreamWritten(self: *Worker, conn: *Connection, bytes: i32) !void {
-        return handlers.onUpstreamWritten(self, conn, bytes);
-    }
-    pub inline fn onUpstreamRead(self: *Worker, conn: *Connection, bytes: i32) !void {
-        return handlers.onUpstreamRead(self, conn, bytes);
-    }
-    pub inline fn onClientWritten(self: *Worker, conn: *Connection, bytes: i32) !void {
-        return handlers.onClientWritten(self, conn, bytes);
-    }
-    pub inline fn onSpliceCompleted(self: *Worker, conn: *Connection, bytes: i32) !void {
-        return handlers.onSpliceCompleted(self, conn, bytes);
-    }
-    pub inline fn onTunnelClientRead(self: *Worker, conn: *Connection, bytes: i32) !void {
-        return handlers.onTunnelClientRead(self, conn, bytes);
-    }
-    pub inline fn onTunnelUpstreamWritten(self: *Worker, conn: *Connection, bytes: i32) !void {
-        return handlers.onTunnelUpstreamWritten(self, conn, bytes);
-    }
-    pub inline fn onTunnelUpstreamRead(self: *Worker, conn: *Connection, bytes: i32) !void {
-        return handlers.onTunnelUpstreamRead(self, conn, bytes);
-    }
-    pub inline fn onTunnelClientWritten(self: *Worker, conn: *Connection, bytes: i32) !void {
-        return handlers.onTunnelClientWritten(self, conn, bytes);
-    }
-
-    pub inline fn queueConnect(self: *Worker, conn: *Connection) !void {
-        return operations.queueConnect(self, conn);
-    }
-    pub inline fn queueReadFromClient(self: *Worker, conn: *Connection) !void {
-        return operations.queueReadFromClient(self, conn);
-    }
-    pub inline fn queueMultishotAccept(self: *Worker) !void {
-        return operations.queueMultishotAccept(self);
-    }
-    pub inline fn queueWriteToUpstream(self: *Worker, conn: *Connection) !void {
-        return operations.queueWriteToUpstream(self, conn);
-    }
-    pub inline fn queueReadFromUpstream(self: *Worker, conn: *Connection) !void {
-        return operations.queueReadFromUpstream(self, conn);
-    }
-    pub inline fn queueWriteToClient(self: *Worker, conn: *Connection) !void {
-        return operations.queueWriteToClient(self, conn);
-    }
-    pub inline fn queueSpliceToClient(self: *Worker, conn: *Connection) !void {
-        return operations.queueSpliceToClient(self, conn);
-    }
-    pub inline fn queueTunnelReadClient(self: *Worker, conn: *Connection) !void {
-        return operations.queueTunnelReadClient(self, conn);
-    }
-    pub inline fn queueTunnelWriteUpstream(self: *Worker, conn: *Connection) !void {
-        return operations.queueTunnelWriteUpstream(self, conn);
-    }
-    pub inline fn queueTunnelReadUpstream(self: *Worker, conn: *Connection) !void {
-        return operations.queueTunnelReadUpstream(self, conn);
-    }
-    pub inline fn queueTunnelWriteClient(self: *Worker, conn: *Connection) !void {
-        return operations.queueTunnelWriteClient(self, conn);
     }
 };
 
