@@ -10,6 +10,34 @@ pub const CacheEntry = struct {
     last_accessed: i64 = 0,
     max_age: i64 = 300,
 
+    pub const CacheStats = struct {
+        hits: std.atomic.Value(u64) = .init(0),
+        misses: std.atomic.Value(u64) = .init(0),
+        total_hit_ns: std.atomic.Value(u64) = .init(0),
+        total_miss_ns: std.atomic.Value(u64) = .init(0),
+
+        pub fn recordHit(self: *CacheStats, ns: u64) void {
+            _ = self.hits.fetchAdd(1, .monotonic);
+            _ = self.total_hit_ns.fetchAdd(ns, .monotonic);
+        }
+
+        pub fn recordMiss(self: *CacheStats, ns: u64) void {
+            _ = self.misses.fetchAdd(1, .monotonic);
+            _ = self.total_miss_ns.fetchAdd(ns, .monotonic);
+        }
+
+        pub fn report(self: *CacheStats) void {
+            const h = self.hits.load(.monotonic);
+            const m = self.misses.load(.monotonic);
+            const avg_hit = if (h > 0) self.total_hit_ns.load(.monotonic) / h else 0;
+            const avg_miss = if (m > 0) self.total_miss_ns.load(.monotonic) / m else 0;
+            std.log.info("Cache hits = {d}", .{h});
+            std.log.info("Misses = {d}", .{m});
+            std.log.info("Avg_hit = {d}us", .{avg_hit / 1000});
+            std.log.info("Avg_miss = {d}us", .{avg_miss / 1000});
+        }
+    };
+
     pub fn deinit(self: *CacheEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.response_headers);
         allocator.free(self.response_body);
@@ -21,6 +49,7 @@ pub const Cache = struct {
     allocator: std.mem.Allocator,
     max_size: usize,
     current_size: usize,
+    mutex: std.Thread.Mutex = .{},
 
     pub fn init(allocator: std.mem.Allocator, max_size: usize) !Cache {
         return .{
@@ -32,6 +61,8 @@ pub const Cache = struct {
     }
 
     pub fn get(self: *Cache, key: u64) ?*CacheEntry {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         if (self.entries.getPtr(key)) |entry| {
             if (isExpired(entry)) {
                 var removed = self.entries.fetchRemove(key).?;
@@ -48,6 +79,8 @@ pub const Cache = struct {
     }
 
     pub fn put(self: *Cache, key: u64, entry: CacheEntry) !void { // ← u64 key
+        self.mutex.lock();
+        defer self.mutex.unlock();
         const entry_size = entry.response_headers.len + entry.response_body.len;
 
         while (self.current_size + entry_size > self.max_size) {
@@ -103,7 +136,7 @@ pub fn isExpired(entry: *const CacheEntry) bool {
 }
 
 pub fn shouldCache(status: http.Status, method: http.Method) bool {
-    if (method == .GET) return false;
+    if (method != .GET) return false;
     return switch (status) {
         .ok => true,
         .moved_permanently => true,

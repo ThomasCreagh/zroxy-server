@@ -42,7 +42,8 @@ pub const Request = struct {
     headers_end_pos: usize = 0,
 
     pub fn parse(self: *Request, data: []const u8) !void {
-        const headers_end = mem.indexOf(u8, data, "\r\n\r\n") orelse {
+        const headers_end = mem.indexOf(u8, data, "\r\n\r\n") orelse
+            mem.indexOf(u8, data, "\n\n") orelse {
             self.headers_complete = false;
             return;
         };
@@ -57,7 +58,7 @@ pub const Request = struct {
         try self.parseStatusLine(status_line);
 
         while (lines.next()) |line| {
-            const trimmed = line[0 .. line.len - 1];
+            const trimmed = mem.trimRight(u8, line, "\r\n \t");
             if (trimmed.len == 0) continue;
             try self.parseHeader(trimmed);
         }
@@ -67,6 +68,11 @@ pub const Request = struct {
         var status_it = mem.splitScalar(u8, line, ' ');
         self.method = parseMethod(status_it.next().?).?;
         self.path = status_it.next().?;
+        //std.debug.print("raw path bytes: {any} {s}", .{ self.path, self.path }); // print every byte
+        // for CONNECT, host:port is in the path, not the Host header
+        if (self.method == .CONNECT) {
+            try self.parseHost(self.path);
+        }
     }
 
     fn parseHeader(self: *Request, line: []const u8) !void {
@@ -116,38 +122,23 @@ pub const Response = struct {
     headers_end_pos: usize = 0,
 
     pub fn parse(self: *Response, data: []const u8) !void {
-        var headers_end: usize = undefined;
-        var headers_end_len: usize = undefined;
-
-        if (mem.indexOf(u8, data, "\r\n\r\n")) |num_4| {
-            headers_end = num_4;
-            headers_end_len = 4;
-        } else {
-            if (mem.indexOf(u8, data, "\n\n")) |num_2| {
-                headers_end = num_2;
-                headers_end_len = 2;
-            } else {
-                self.headers_complete = false;
-                return;
-            }
-        }
+        const headers_end = mem.indexOf(u8, data, "\r\n\r\n") orelse
+            mem.indexOf(u8, data, "\n\n") orelse {
+            self.headers_complete = false;
+            return;
+        };
 
         self.headers_complete = true;
-        self.headers_end_pos = headers_end + headers_end_len; // + \r\n\r\n or \n\n
+        self.headers_end_pos = headers_end + 4; // + \r\n\r\n
 
         const headers = data[0..headers_end];
         var lines = mem.splitScalar(u8, headers, '\n');
 
         const status_line = lines.next() orelse return ParseError.InvalidResponse;
-        try self.parseStatusLine(status_line);
+        try self.parseStatusLine(mem.trimRight(u8, status_line, "\r\n \t"));
 
         while (lines.next()) |line| {
-            var trimmed: []const u8 = undefined;
-            if (headers_end_len == 4) {
-                trimmed = line[0 .. line.len - 1];
-            } else {
-                trimmed = line[0..line.len];
-            }
+            const trimmed = mem.trimRight(u8, line, "\r\n \t");
             if (trimmed.len == 0) continue;
             try self.parseHeader(trimmed);
         }

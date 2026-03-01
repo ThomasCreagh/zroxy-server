@@ -30,6 +30,9 @@ pub fn onClientRead(worker: *Worker, conn: *Connection, bytes: i32) !void {
         try posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&flag));
         conn.upstream_fd = fd;
 
+        const addr = try worker.upstream.resolveHost(host, port);
+
+        if (worker.upstream.isBlocked(addr)) return error.UrlBlocked;
         conn.upstream_addr = try worker.upstream.resolveHost(host, port);
         conn.state = .connecting_upstream;
         conn.is_tunnel = true;
@@ -39,11 +42,31 @@ pub fn onClientRead(worker: *Worker, conn: *Connection, bytes: i32) !void {
 
     log.info("{s} {s}:{d}{s}", .{ @tagName(conn.request.method), host, port, conn.request.path });
 
+    const cache_key = @import("caching.zig").makeCacheKey(host, conn.request.path);
+    conn.cache_key = cache_key;
+    conn.request_start_ns = std.time.nanoTimestamp();
+
+    if (conn.request.method == .GET) {
+        if (worker.cache.get(cache_key)) |entry| {
+            const elapsed: u64 = @intCast(std.time.nanoTimestamp() - conn.request_start_ns);
+            worker.stats.recordHit(elapsed);
+            log.info("cache HIT {s}{s}", .{ host, conn.request.path });
+            @memcpy(conn.upstream_buf[0..entry.response_headers.len], entry.response_headers);
+            @memcpy(conn.upstream_buf[entry.response_headers.len..][0..entry.response_body.len], entry.response_body);
+            conn.upstream_buf_len = entry.response_headers.len + entry.response_body.len;
+            conn.upstream_buf_sent = 0;
+            conn.state = .forwarding_to_client;
+            try operations.queueWriteToClient(worker, conn);
+            return;
+        }
+    }
+
     const upstream = try worker.getUpstreamFromPool();
     conn.upstream_fd = upstream.fd;
 
     if (upstream.is_new) {
         conn.upstream_addr = try worker.upstream.resolveHost(host, port);
+        if (worker.upstream.isBlocked(conn.upstream_addr)) return error.UrlBlocked;
         conn.state = .connecting_upstream;
         try operations.queueConnect(worker, conn);
     } else {
@@ -162,6 +185,32 @@ pub fn onUpstreamRead(worker: *Worker, conn: *Connection, bytes: i32) !void {
         };
     }
 
+    if (conn.response.is_chunked) {
+        const buf = conn.upstream_buf[0..conn.upstream_buf_len];
+        if (std.mem.endsWith(u8, buf, "0\r\n\r\n")) {
+            const cache_mod = @import("caching.zig");
+            if (cache_mod.shouldCache(conn.response.status, conn.request.method)) {
+                const headers = buf[0..conn.response.headers_end_pos];
+                const body = buf[conn.response.headers_end_pos..];
+                const h_copy = worker.allocator.dupe(u8, headers) catch null;
+                const b_copy = worker.allocator.dupe(u8, body) catch null;
+                if (h_copy != null and b_copy != null) {
+                    const entry = cache_mod.CacheEntry{
+                        .response_headers = h_copy.?,
+                        .response_body = b_copy.?,
+                        .content_length = body.len,
+                        .status_code = @intFromEnum(conn.response.status),
+                        .timestamp = std.time.timestamp(),
+                    };
+                    worker.cache.put(conn.cache_key, entry) catch {};
+                    const elapsed: u64 = @intCast(std.time.nanoTimestamp() - conn.request_start_ns);
+                    worker.stats.recordMiss(elapsed);
+                    log.info("cached chunked {s}", .{conn.request.path});
+                }
+            }
+        }
+    }
+
     if (conn.upstream_buf_sent < conn.response.headers_end_pos) {
         conn.upstream_buf_sent = 0;
         conn.state = .forwarding_to_client;
@@ -185,7 +234,8 @@ pub fn onClientWritten(worker: *Worker, conn: *Connection, bytes: i32) !void {
     if (conn.upstream_buf_sent >= conn.upstream_buf_len) {
         const response_complete = blk: {
             if (conn.response.is_chunked) {
-                break :blk false;
+                const buf = conn.upstream_buf[0..conn.upstream_buf_len];
+                break :blk std.mem.endsWith(u8, buf, "0\r\n\r\n");
             } else if (conn.response.content_length) |expected| {
                 const body_received = conn.response.bytes_received - conn.response.headers_end_pos;
                 break :blk body_received >= expected;
@@ -195,6 +245,33 @@ pub fn onClientWritten(worker: *Worker, conn: *Connection, bytes: i32) !void {
         };
 
         if (response_complete) {
+            if (conn.request.method == .GET and !conn.response.is_chunked and !conn.using_splice) {
+                if (conn.response.content_length) |cl| {
+                    const total = conn.response.headers_end_pos + cl;
+                    if (total <= conn.upstream_buf_len) {
+                        const cache_mod = @import("caching.zig");
+                        const headers = conn.upstream_buf[0..conn.response.headers_end_pos];
+                        const body = conn.upstream_buf[conn.response.headers_end_pos..total];
+                        const h_copy = worker.allocator.dupe(u8, headers) catch null;
+                        const b_copy = worker.allocator.dupe(u8, body) catch null;
+                        if (h_copy != null and b_copy != null) {
+                            const entry = cache_mod.CacheEntry{
+                                .response_headers = h_copy.?,
+                                .response_body = b_copy.?,
+                                .content_length = cl,
+                                .status_code = @intFromEnum(conn.response.status),
+                                .timestamp = std.time.timestamp(),
+                            };
+                            if (cache_mod.shouldCache(conn.response.status, conn.request.method)) {
+                                worker.cache.put(conn.cache_key, entry) catch {};
+                                const elapsed: u64 = @intCast(std.time.nanoTimestamp() - conn.request_start_ns);
+                                worker.stats.recordMiss(elapsed);
+                                log.info("cached {s}", .{conn.request.path});
+                            }
+                        }
+                    }
+                }
+            }
             if (conn.upstream_fd) |fd| {
                 worker.returnUpstreamToPool(fd);
                 conn.upstream_fd = null;

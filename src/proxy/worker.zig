@@ -19,13 +19,14 @@ pub const Worker = struct {
     worker_id: usize,
     upstream: *UpstreamManager,
     upstream_pool: std.ArrayList(posix.socket_t),
-    cache: cache_mod.Cache,
+    cache: *cache_mod.Cache,
+    stats: *cache_mod.CacheEntry.CacheStats,
 
     const MAX_POOL_SIZE = 50;
     const RING_SIZE = 8192;
     const CQE_BUF_SIZE = 128;
 
-    pub fn init(allocator: std.mem.Allocator, listen_fd: posix.socket_t, worker_id: usize, upstream: *UpstreamManager) !Worker {
+    pub fn init(allocator: std.mem.Allocator, listen_fd: posix.socket_t, worker_id: usize, upstream: *UpstreamManager, cache: *cache_mod.Cache, stats: *cache_mod.CacheEntry.CacheStats) !Worker {
         return .{
             .ring = try linux.IoUring.init(RING_SIZE, 0),
             .connections = std.AutoHashMap(u64, *Connection).init(allocator),
@@ -33,8 +34,9 @@ pub const Worker = struct {
             .listen_fd = listen_fd,
             .worker_id = worker_id,
             .upstream = upstream,
+            .cache = cache,
+            .stats = stats,
             .upstream_pool = try std.ArrayList(posix.socket_t).initCapacity(allocator, MAX_POOL_SIZE),
-            .cache = try cache_mod.Cache.init(allocator, 100 * 1024 * 1024),
         };
     }
 
@@ -218,7 +220,6 @@ pub const Worker = struct {
         }
         self.connections.deinit();
         self.ring.deinit();
-        self.cache.deinit();
     }
 };
 

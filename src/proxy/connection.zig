@@ -46,6 +46,9 @@ pub const Connection = struct {
     tun_u2c_buf: [BUF_SIZE]u8 = undefined,
     tun_u2c_len: usize = 0,
 
+    cache_key: u64 = 0,
+    request_start_ns: i128 = 0,
+
     pub fn encodeUserData(ptr: *Connection, op: TunnelOp) u64 {
         const addr = @intFromPtr(ptr);
         const op_bits: u64 = @intFromEnum(op);

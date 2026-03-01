@@ -1,6 +1,9 @@
 const std = @import("std");
 const Worker = @import("worker.zig").Worker;
 const UpstreamManager = @import("upstream.zig").UpstreamManager;
+const cache_mod = @import("caching.zig");
+const Cache = cache_mod.Cache;
+const CacheStats = cache_mod.CacheEntry.CacheStats;
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -11,34 +14,56 @@ pub const Server = struct {
     threads: []std.Thread,
     allocator: std.mem.Allocator,
     listening_sockets: []posix.socket_t,
-    upstream: UpstreamManager,
+    upstream: *UpstreamManager,
+    cache: *Cache,
+    cachestats: *CacheStats,
     port: u16,
 
     pub fn init(allocator: std.mem.Allocator, port: u16, num_workers: usize) !Server {
         const workers = try allocator.alloc(Worker, num_workers);
         const threads = try allocator.alloc(std.Thread, num_workers);
         const listening_sockets = try allocator.alloc(posix.socket_t, num_workers);
-        const upstream = UpstreamManager.init(allocator);
+        //const upstream = UpstreamManager.init(allocator);
+        const upstream = try allocator.create(UpstreamManager);
+        upstream.* = UpstreamManager.init(allocator);
+        const cachestats = try allocator.create(CacheStats);
+        cachestats.* = .{};
+        const cache = try allocator.create(cache_mod.Cache);
+        cache.* = try cache_mod.Cache.init(allocator, 100 * 1024 * 1024);
 
         for (listening_sockets, 0..) |*socket, i| {
             socket.* = try createListenSocket(port);
             std.log.info("Created listen socket {} on port {}\n", .{ i, port });
         }
+        for (workers, 0..) |*worker, i| {
+            worker.* = try Worker.init(allocator, listening_sockets[i], i, upstream, cache, cachestats);
+        }
 
-        var server = Server{
+        return .{
             .workers = workers,
             .threads = threads,
             .allocator = allocator,
             .listening_sockets = listening_sockets,
             .upstream = upstream,
+            .cachestats = cachestats,
+            .cache = cache,
             .port = port,
         };
 
-        for (server.workers, 0..) |*worker, i| {
-            worker.* = try Worker.init(allocator, listening_sockets[i], i, &server.upstream);
-        }
+        //var server = Server{
+        //    .workers = workers,
+        //    .threads = threads,
+        //    .allocator = allocator,
+        //    .listening_sockets = listening_sockets,
+        //    .upstream = upstream,
+        //    .port = port,
+        //};
 
-        return server;
+        //for (server.workers, 0..) |*worker, i| {
+        //    worker.* = try Worker.init(allocator, listening_sockets[i], i, &server.upstream);
+        //}
+
+        //return server;
     }
 
     pub fn run(self: *Server) !void {
@@ -67,6 +92,10 @@ pub const Server = struct {
             worker.deinit();
         }
         self.upstream.deinit();
+        self.cache.deinit();
+        self.allocator.destroy(self.cache);
+        self.allocator.destroy(self.upstream);
+        self.allocator.destroy(self.cachestats);
         self.allocator.free(self.listening_sockets);
         self.allocator.free(self.workers);
         self.allocator.free(self.threads);

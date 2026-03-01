@@ -3,7 +3,7 @@ const posix = std.posix;
 const tui = @import("tui.zig");
 const Server = @import("proxy/server.zig").Server;
 
-const PORT = 8081;
+const PORT = 8080;
 const WORKERS = 6;
 
 var g_tui: tui.Tui = .{};

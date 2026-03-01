@@ -47,7 +47,6 @@ pub const UpstreamManager = struct {
 
         const addr = try self.dnsLookup(host, port);
         try self.dns_cache.put(cache_key, .{ .addr = addr, .timestamp = std.time.timestamp() });
-        if (self.isBlocked(addr)) return error.HostBlocked;
         return addr;
     }
 
@@ -92,9 +91,11 @@ pub const UpstreamManager = struct {
             0,
         );
     }
+
     pub fn blockHost(self: *UpstreamManager, host: []const u8) !void {
-        // resolve to ip first, block port 80 just to get the addr
-        const addr = try self.resolveHost(host, 80);
+
+        // resolve to ip first, block port 443 if not then 80 just to get the addr
+        const addr = self.resolveHost(host, 443) catch try self.resolveHost(host, 80);
         self.mutex.lock();
         defer self.mutex.unlock();
         try self.blocked_ips.put(addr.addr, {});

@@ -41,6 +41,7 @@ pub const Tui = struct {
         try w.writeAll("\x1b[3;1H  block <url>");
         try w.writeAll("\x1b[4;1H  unblock <url>");
         try w.writeAll("\x1b[5;1H  quit");
+        try w.writeAll("\x1b[6;1H  stats");
         try w.print("\x1b[{d};1H Enter command: ", .{self.term_rows});
         try w.flush();
     }
@@ -173,6 +174,9 @@ pub const Tui = struct {
                 return;
             };
             self.appendLog("unblocked: {s}", .{host});
+        } else if (std.mem.startsWith(u8, cmd, "stats")) {
+            self.appendLog("--- cache stats ---", .{});
+            self.server.cachestats.report();
         } else if (std.mem.startsWith(u8, cmd, "quit")) {
             self.appendLog("quitting...", .{});
             posix.raise(posix.SIG.INT) catch {};
