@@ -28,6 +28,8 @@ pub const Connection = struct {
     user_data: u64,
     closing: bool = false,
 
+    pending_ops: u32 = 0,
+
     body_bytes_spliced: usize = 0,
     using_splice: bool = false,
 
@@ -35,6 +37,14 @@ pub const Connection = struct {
 
     request: http.Request = .{},
     response: http.Response = .{},
+
+    is_tunnel: bool = false,
+
+    tun_c2u_buf: [BUF_SIZE]u8 = undefined,
+    tun_c2u_len: usize = 0,
+
+    tun_u2c_buf: [BUF_SIZE]u8 = undefined,
+    tun_u2c_len: usize = 0,
 
     pub fn encodeUserData(ptr: *Connection, op: TunnelOp) u64 {
         const addr = @intFromPtr(ptr);
@@ -58,6 +68,7 @@ pub const Connection = struct {
         reading_upstream_response,
         forwarding_to_client,
         splicing_to_client,
+        tunneling,
     };
 
     pub fn init(fd: posix.socket_t, user_data: u64) Connection {
