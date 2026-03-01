@@ -1,5 +1,6 @@
 const std = @import("std");
 const Worker = @import("worker.zig").Worker;
+const UpstreamManager = @import("upstream.zig").UpstreamManager;
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -10,29 +11,34 @@ pub const Server = struct {
     threads: []std.Thread,
     allocator: std.mem.Allocator,
     listening_sockets: []posix.socket_t,
+    upstream: UpstreamManager,
     port: u16,
 
     pub fn init(allocator: std.mem.Allocator, port: u16, num_workers: usize) !Server {
         const workers = try allocator.alloc(Worker, num_workers);
         const threads = try allocator.alloc(std.Thread, num_workers);
         const listening_sockets = try allocator.alloc(posix.socket_t, num_workers);
+        const upstream = UpstreamManager.init(allocator);
 
         for (listening_sockets, 0..) |*socket, i| {
             socket.* = try createListenSocket(port);
             std.log.info("Created listen socket {} on port {}\n", .{ i, port });
         }
 
-        for (workers, 0..) |*worker, i| {
-            worker.* = try Worker.init(allocator, listening_sockets[i], i);
-        }
-
-        return .{
+        var server = Server{
             .workers = workers,
             .threads = threads,
             .allocator = allocator,
             .listening_sockets = listening_sockets,
+            .upstream = upstream,
             .port = port,
         };
+
+        for (server.workers, 0..) |*worker, i| {
+            worker.* = try Worker.init(allocator, listening_sockets[i], i, &server.upstream);
+        }
+
+        return server;
     }
 
     pub fn run(self: *Server) !void {
@@ -45,6 +51,14 @@ pub const Server = struct {
         }
     }
 
+    pub fn blockHost(self: *Server, host: []const u8) !void {
+        try self.upstream.blockHost(host);
+    }
+
+    pub fn unblockHost(self: *Server, host: []const u8) !void {
+        try self.upstream.unblockHost(host);
+    }
+
     pub fn deinit(self: *Server) void {
         for (self.listening_sockets) |socket| {
             posix.close(socket);
@@ -52,6 +66,7 @@ pub const Server = struct {
         for (self.workers) |*worker| {
             worker.deinit();
         }
+        self.upstream.deinit();
         self.allocator.free(self.listening_sockets);
         self.allocator.free(self.workers);
         self.allocator.free(self.threads);

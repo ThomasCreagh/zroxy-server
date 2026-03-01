@@ -5,6 +5,8 @@ const linux = std.os.linux;
 pub const UpstreamManager = struct {
     allocator: std.mem.Allocator,
     dns_cache: std.AutoHashMap(u64, CachedAddress),
+    blocked_ips: std.AutoHashMap(u32, void),
+    mutex: std.Thread.RwLock = .{},
 
     const CachedAddress = struct {
         addr: posix.sockaddr.in,
@@ -15,6 +17,7 @@ pub const UpstreamManager = struct {
         return .{
             .allocator = allocator,
             .dns_cache = std.AutoHashMap(u64, CachedAddress).init(allocator),
+            .blocked_ips = std.AutoHashMap(u32, void).init(allocator),
         };
     }
 
@@ -44,6 +47,7 @@ pub const UpstreamManager = struct {
 
         const addr = try self.dnsLookup(host, port);
         try self.dns_cache.put(cache_key, .{ .addr = addr, .timestamp = std.time.timestamp() });
+        if (self.isBlocked(addr)) return error.HostBlocked;
         return addr;
     }
 
@@ -88,8 +92,29 @@ pub const UpstreamManager = struct {
             0,
         );
     }
+    pub fn blockHost(self: *UpstreamManager, host: []const u8) !void {
+        // resolve to ip first, block port 80 just to get the addr
+        const addr = try self.resolveHost(host, 80);
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.blocked_ips.put(addr.addr, {});
+    }
+
+    pub fn unblockHost(self: *UpstreamManager, host: []const u8) !void {
+        const addr = try self.resolveHost(host, 80);
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        _ = self.blocked_ips.remove(addr.addr);
+    }
+
+    pub fn isBlocked(self: *UpstreamManager, addr: posix.sockaddr.in) bool {
+        self.mutex.lockShared();
+        defer self.mutex.unlockShared();
+        return self.blocked_ips.contains(addr.addr);
+    }
 
     pub fn deinit(self: *UpstreamManager) void {
         self.dns_cache.deinit();
+        self.blocked_ips.deinit();
     }
 };

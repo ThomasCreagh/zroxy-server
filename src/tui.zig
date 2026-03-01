@@ -1,4 +1,5 @@
 const std = @import("std");
+const Server = @import("proxy/server.zig").Server;
 const posix = std.posix;
 
 const MENU_WIDTH = 34;
@@ -7,6 +8,7 @@ const DIVIDER_COL = MENU_WIDTH + 1;
 var g_original_termios: posix.termios = undefined;
 
 pub const Tui = struct {
+    server: *Server = undefined,
     mutex: std.Thread.Mutex = .{},
     log_row: u16 = 3,
     term_rows: u16 = 24,
@@ -92,7 +94,6 @@ pub const Tui = struct {
                 var buf: [64]u8 = undefined;
                 var stdout_impl = std.fs.File.stdout().writer(&buf);
                 const w = &stdout_impl.interface;
-                w.writeAll("signal caught\n") catch {};
                 posix.tcsetattr(std.fs.File.stdin().handle, .FLUSH, g_original_termios) catch {};
                 w.writeAll("\x1b[?25h\x1b[2J\x1b[H") catch {};
                 w.flush() catch {};
@@ -159,9 +160,22 @@ pub const Tui = struct {
 
     fn handleCommand(self: *Tui, cmd: []const u8) void {
         if (std.mem.startsWith(u8, cmd, "block ")) {
-            self.appendLog("blocked: {s}", .{cmd[6..]});
+            const host = cmd[6..];
+            self.server.blockHost(host) catch |err| {
+                self.appendLog("block failed: {}", .{err});
+                return;
+            };
+            self.appendLog("blocked: {s}", .{host});
         } else if (std.mem.startsWith(u8, cmd, "unblock ")) {
-            self.appendLog("unblocked: {s}", .{cmd[8..]});
+            const host = cmd[8..];
+            self.server.unblockHost(host) catch |err| {
+                self.appendLog("unblock failed: {}", .{err});
+                return;
+            };
+            self.appendLog("unblocked: {s}", .{host});
+        } else if (std.mem.startsWith(u8, cmd, "quit")) {
+            self.appendLog("quitting...", .{});
+            posix.raise(posix.SIG.INT) catch {};
         } else if (cmd.len > 0) {
             self.appendLog("unknown command: {s}", .{cmd});
         }

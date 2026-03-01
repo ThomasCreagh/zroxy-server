@@ -17,7 +17,7 @@ pub const Worker = struct {
     allocator: std.mem.Allocator,
     listen_fd: posix.socket_t,
     worker_id: usize,
-    upstream: UpstreamManager,
+    upstream: *UpstreamManager,
     upstream_pool: std.ArrayList(posix.socket_t),
     cache: cache_mod.Cache,
 
@@ -25,14 +25,14 @@ pub const Worker = struct {
     const RING_SIZE = 8192;
     const CQE_BUF_SIZE = 128;
 
-    pub fn init(allocator: std.mem.Allocator, listen_fd: posix.socket_t, worker_id: usize) !Worker {
+    pub fn init(allocator: std.mem.Allocator, listen_fd: posix.socket_t, worker_id: usize, upstream: *UpstreamManager) !Worker {
         return .{
             .ring = try linux.IoUring.init(RING_SIZE, 0),
             .connections = std.AutoHashMap(u64, *Connection).init(allocator),
             .allocator = allocator,
             .listen_fd = listen_fd,
             .worker_id = worker_id,
-            .upstream = UpstreamManager.init(allocator),
+            .upstream = upstream,
             .upstream_pool = try std.ArrayList(posix.socket_t).initCapacity(allocator, MAX_POOL_SIZE),
             .cache = try cache_mod.Cache.init(allocator, 100 * 1024 * 1024),
         };

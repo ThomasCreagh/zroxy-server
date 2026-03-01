@@ -36,6 +36,7 @@ pub fn main() !void {
 
     var server = try Server.init(allocator, PORT, WORKERS);
     defer server.deinit();
+    g_tui.server = &server;
 
     const server_thread = try std.Thread.spawn(.{}, Server.run, .{&server});
     defer server_thread.join();
