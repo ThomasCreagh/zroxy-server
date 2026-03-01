@@ -90,29 +90,7 @@ pub const Worker = struct {
                 if (conn.pending_ops == 0) try self.freeConnection(conn);
                 return;
             }
-            switch (op) {
-                .read_client => handlers.onTunnelClientRead(self, conn, result) catch |err| {
-                    log.err("onTunnelClientRead: {}", .{err});
-                    conn.closing = true;
-                    if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
-                },
-                .write_upstream => handlers.onTunnelUpstreamWritten(self, conn, result) catch |err| {
-                    log.err("onTunnelUpstreamWritten: {}", .{err});
-                    conn.closing = true;
-                    if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
-                },
-                .read_upstream => handlers.onTunnelUpstreamRead(self, conn, result) catch |err| {
-                    log.err("onTunnelUpstreamRead: {}", .{err});
-                    conn.closing = true;
-                    if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
-                },
-                .write_client => handlers.onTunnelClientWritten(self, conn, result) catch |err| {
-                    log.err("onTunnelClientWritten: {}", .{err});
-                    conn.closing = true;
-                    if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
-                },
-                .none => {},
-            }
+            try self.tunnelStateMachine(conn, op, result);
             return;
         }
 
@@ -121,7 +99,10 @@ pub const Worker = struct {
             if (conn.pending_ops == 0) try self.freeConnection(conn);
             return;
         }
+        try self.stateMachine(conn, result);
+    }
 
+    fn stateMachine(self: *Worker, conn: *Connection, result: i32) !void {
         switch (conn.state) {
             .reading_client_request => handlers.onClientRead(self, conn, result) catch |err| {
                 log.err("onClientRead: {}", .{err});
@@ -154,6 +135,32 @@ pub const Worker = struct {
                 if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
             },
             .tunneling => unreachable,
+        }
+    }
+
+    fn tunnelStateMachine(self: *Worker, conn: *Connection, op: TunnelOp, result: i32) !void {
+        switch (op) {
+            .read_client => handlers.onTunnelClientRead(self, conn, result) catch |err| {
+                log.err("onTunnelClientRead: {}", .{err});
+                conn.closing = true;
+                if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
+            },
+            .write_upstream => handlers.onTunnelUpstreamWritten(self, conn, result) catch |err| {
+                log.err("onTunnelUpstreamWritten: {}", .{err});
+                conn.closing = true;
+                if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
+            },
+            .read_upstream => handlers.onTunnelUpstreamRead(self, conn, result) catch |err| {
+                log.err("onTunnelUpstreamRead: {}", .{err});
+                conn.closing = true;
+                if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
+            },
+            .write_client => handlers.onTunnelClientWritten(self, conn, result) catch |err| {
+                log.err("onTunnelClientWritten: {}", .{err});
+                conn.closing = true;
+                if (conn.pending_ops == 0) self.freeConnection(conn) catch {};
+            },
+            .none => {},
         }
     }
 
