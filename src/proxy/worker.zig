@@ -62,7 +62,6 @@ pub const Worker = struct {
         const user_data = cqe.user_data;
         const result = cqe.res;
 
-        // Multishot accept — user_data == 0, no Connection pointer.
         if (user_data == 0) {
             if (result >= 0) {
                 try self.addConnection(result);

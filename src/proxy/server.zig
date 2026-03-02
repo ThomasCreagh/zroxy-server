@@ -49,21 +49,6 @@ pub const Server = struct {
             .cache = cache,
             .port = port,
         };
-
-        //var server = Server{
-        //    .workers = workers,
-        //    .threads = threads,
-        //    .allocator = allocator,
-        //    .listening_sockets = listening_sockets,
-        //    .upstream = upstream,
-        //    .port = port,
-        //};
-
-        //for (server.workers, 0..) |*worker, i| {
-        //    worker.* = try Worker.init(allocator, listening_sockets[i], i, &server.upstream);
-        //}
-
-        //return server;
     }
 
     pub fn run(self: *Server) !void {
